@@ -24,7 +24,8 @@ from .parser import STD8, parse_number
 from .units import PRESETS, UnitSystem, parse_system
 
 _DENSITY_ANCHORS = [7850.0, 7800.0, 7830.0, 8900.0, 2700.0, 4500.0,
-                    1000.0, 2400.0, 1200.0, 7200.0, 1630.0]  # kg/m^3 (1630=TNT)
+                    1000.0, 2400.0, 1200.0, 7200.0, 1630.0,  # kg/m^3 (1630=TNT)
+                    938.0]      # gelatine bird surrogate (SPH bird strike)
 _MODULUS_ANCHORS = [2.1e11, 2.0e11, 1.93e11, 1.1e11, 7.0e10, 6.9e10,
                     3.0e9, 1.0e9]                            # Pa
 # *ICFD_MAT probes: common working fluids (water / air at ~15-25 degC)

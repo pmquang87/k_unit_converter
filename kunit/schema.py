@@ -20,7 +20,7 @@ from .units import (ACCEL, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC, DENSITY,
                     Dim, DIM_NAMES, DIMLESS, FORCE, FREQ, INERTIA, L4, LENGTH,
                     MASS, MASS_AREA, MASS_LEN, MOMENT, PRESSURE, RATE,
                     ROT_DAMP, SPEC_HEAT, STIFF, STIFF_LEN, STRESS_M3, TEMP,
-                    THERM_COND, TIME, VELOCITY, VISCOSITY,
+                    THERM_COND, TIME, VELOCITY, VISCOSITY, VOLUME,
                     BLAST_BUILTIN_UNITS, BLAST_UNIT_SYSTEMS, CSCM_UNITS,
                     CSCM_UNIT_SYSTEMS, blast_unit5_factors)
 
@@ -81,10 +81,36 @@ SPECS: Dict[str, Spec] = {
         C(),
         C({0: LENGTH, 1: LENGTH, 2: LENGTH, 3: LENGTH, 5: MASS_AREA})]),
     "SECTION_SOLID": Spec(cards=[C()], extra_ok=True),
+    # R16 Vol I p.41-108..41-110 (*SECTION_SPH): SECID CSLH HMIN HMAX SPHINI
+    # DEATH START SPHKERN.  CSLH and HMIN/HMAX are scale factors on the
+    # smoothing length (dimensionless); SPHINI is an optional initial
+    # smoothing length (a length, overrides CSLH); DEATH/START are the stop /
+    # start times of the particle approximation; SPHKERN is a kernel flag.
+    # The INTERACTION and USER options share this one-card layout.
+    "SECTION_SPH": Spec(cards=[C({4: LENGTH, 5: TIME, 6: TIME})]),
+    "SECTION_SPH_INTERACTION": Spec(cards=[C({4: LENGTH, 5: TIME, 6: TIME})]),
+    "SECTION_SPH_USER": Spec(cards=[C({4: LENGTH, 5: TIME, 6: TIME})]),
+    # ELLIPSE adds Card 2 HXCSLH HYCSLH HZCSLH HXINI HYINI HZINI (p.41-109):
+    # per-direction smoothing-length constants (dimensionless) and optional
+    # per-direction initial smoothing lengths.
+    "SECTION_SPH_ELLIPSE": Spec(cards=[
+        C({4: LENGTH, 5: TIME, 6: TIME}),
+        C({3: LENGTH, 4: LENGTH, 5: LENGTH})]),
 
     # ── materials (field maps cross-checked against the R16 manual / k2rad) ─
     "MAT_ELASTIC": Spec(cards=[C({1: DENSITY, 2: PRESSURE, 6: PRESSURE})],
                         probe={"ro": (0, 1), "e": (0, 2)}),
+    # R16 Vol II p.2-145..2-148 (*MAT_ELASTIC_FLUID / MAT_001_FLUID):
+    # Card1 MID RO E PR DA DB K - RO density, E Young's modulus, K bulk
+    # modulus (E/PR are ignored for FLUID but keep their dimensions); DA/DB
+    # are beam-only damping factors, unused for FLUID (solids only).
+    # Card2 VC CP - VC is the dimensionless tensor viscosity coefficient
+    # ("values between .1 and .5"), CP the cavitation pressure.
+    # E < 0 (curve ID + extra Card 1.1) is refused by x_mat_001.
+    "MAT_ELASTIC_FLUID": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 6: PRESSURE}),
+        C({1: PRESSURE})],
+        probe={"ro": (0, 1), "e": (0, 2)}),
     "MAT_PLASTIC_KINEMATIC": Spec(cards=[
         C({1: DENSITY, 2: PRESSURE, 4: PRESSURE, 5: PRESSURE}),
         C({0: RATE})],
@@ -169,6 +195,14 @@ SPECS: Dict[str, Spec] = {
     "CONTROL_TIMESTEP": Spec(cards=[C({0: TIME, 3: TIME, 4: TIME})],
                              curves=[(0, 5, TIME, TIME)], extra_ok=True),
     "CONTROL_DYNAMIC_RELAXATION": Spec(cards=[C({3: TIME})]),
+    # R16 Vol I p.12-530..12-535 (*CONTROL_SPH): Card1 NCBS BOXID DT IDIM
+    # NMNEIGH FORM START MAXV - DT is the SPH death time, START the particle-
+    # approximation start time, MAXV the deactivation velocity threshold
+    # (negative MAXV = clamp instead of deactivate; sign survives scaling).
+    # Optional Card2 (CONT..ISYMP) holds flags/percentages and Card3 (ITHK
+    # ISTAB QL SPHSORT ISHIFT) flags plus the dimensionless quasi-linear
+    # coefficient QL, so both stay unscaled.
+    "CONTROL_SPH": Spec(cards=[C({2: TIME, 6: TIME, 7: VELOCITY}), C(), C()]),
     "CONTROL_ALE": Spec(cards=[C(), C({0: TIME, 1: TIME, 6: PRESSURE})],
                         extra_ok=True),
     "CONTROL_IMPLICIT_GENERAL": Spec(cards=[C({1: TIME})]),
@@ -229,7 +263,8 @@ SPECS: Dict[str, Spec] = {
 
 # numeric aliases
 _MAT_ALIASES = {
-    "MAT_001": "MAT_ELASTIC", "MAT_003": "MAT_PLASTIC_KINEMATIC",
+    "MAT_001": "MAT_ELASTIC", "MAT_001_FLUID": "MAT_ELASTIC_FLUID",
+    "MAT_003": "MAT_PLASTIC_KINEMATIC",
     "MAT_008": "MAT_HIGH_EXPLOSIVE_BURN", "MAT_009": "MAT_NULL",
     "MAT_015": "MAT_JOHNSON_COOK",
     "MAT_020": "MAT_RIGID", "MAT_022": "MAT_COMPOSITE_DAMAGE",
@@ -495,6 +530,42 @@ def h_mat_024(block: Block, ctx) -> None:
             ctx.register_table(lcss, RATE, STRAIN, PRESSURE)
         if lcsr:
             ctx.register_curve(lcsr, RATE, DIMLESS, "MAT_024 LCSR")
+
+
+def h_element_sph(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.19-136 (*ELEMENT_SPH[_VOLUME]): NID PID MASS NEND in the
+    i8,i8,e16,i8 layout shared with *ELEMENT_MASS.  MASS > 0 is the particle
+    mass, but MASS < 0 - or any value with the VOLUME option - is a particle
+    VOLUME (density then comes from the material card), so the field's
+    dimension depends on its sign.  NEND generation replicates the same MASS
+    value across NID..NEND, so scaling the one field covers the range."""
+    if not edit:
+        return
+    kf = ctx.kf
+    vol_opt = "VOLUME" in block.name.split("_")
+    for li in block.data:
+        v = kf.get_number(li, EMASS_W, block.long, 2)
+        if not v:
+            continue
+        dim = VOLUME if (vol_opt or v < 0) else MASS
+        kf.scale_field(li, EMASS_W, block.long, 2, ctx.fac(dim), pad_right=2)
+    ctx.count(block.name)
+
+
+def x_mat_001(block: Block, ctx) -> None:
+    """Edit-time check: E < 0 in *MAT_ELASTIC[_FLUID] makes |E| a curve ID
+    and inserts Card 1.1 (R16 Vol II p.2-145..2-146), which the fixed card
+    layout cannot model - refuse rather than corrupt the curve reference."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    e = kf.get_number(data[0], STD8, block.long, 2)
+    if e is not None and e < 0:
+        ctx.error(f"*{block.name}: E < 0 means |E| is a curve ID and an "
+                  "extra Card 1.1 (EFUNC CNVT ITERLM) follows Card 1 "
+                  "(R16 Vol II p.2-145) - this layout is not modelled; "
+                  "convert this material manually.")
 
 
 def x_mat_015(block: Block, ctx) -> None:
@@ -1039,6 +1110,8 @@ def x_scan_part(block: Block, ctx) -> None:
 CUSTOM: Dict[str, Callable] = {
     "DEFINE_CURVE": h_define_curve,
     "DEFINE_TABLE": h_define_table,
+    "ELEMENT_SPH": h_element_sph,
+    "ELEMENT_SPH_VOLUME": h_element_sph,
     "LOAD_BLAST_ENHANCED": h_blast,
     "LOAD_BLAST": h_blast,
     "LOAD_NODE_POINT": h_load_node_or_rb,
@@ -1118,5 +1191,7 @@ SCAN_EXTRA: Dict[str, Callable] = {
 }
 # edit-time extras (warnings that need field values)
 EDIT_EXTRA: Dict[str, Callable] = {
+    "MAT_ELASTIC": x_mat_001,
+    "MAT_ELASTIC_FLUID": x_mat_001,
     "MAT_JOHNSON_COOK": x_mat_015,
 }

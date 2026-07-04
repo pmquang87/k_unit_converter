@@ -786,5 +786,96 @@ class IcfdTests(unittest.TestCase):
             convert(p, SI, TON, p + ".o.k", self_check=False)
 
 
+class SphTests(unittest.TestCase):
+    """SPH bird-strike keywords (R16 Vol I p.12-530, p.19-136, p.41-108;
+    Vol II p.2-145), gelatin bird + fluid head in kg-m-s."""
+
+    DECK = ("*KEYWORD\n"
+            "*CONTROL_SPH\n"
+            + F(1, 1, "1.00000E20", 3, 1500, 0, 0.002, "1.00000E15") + "\n"
+            + F(0, 0, 0, 0, 0, 0, 0, 100) + "\n"
+            "*SECTION_SPH_TITLE\n"
+            "bird\n"
+            + F(2, 1.2, 0.2, 2.0, 0.005, "1.00000E20", 0.001) + "\n"
+            "*MAT_NULL_TITLE\n"
+            "bird\n"
+            + F(1, 938.0, -0.09974, 0.0027, 1.1, 0.8, 0.0, 0.0) + "\n"
+            "*MAT_ELASTIC_FLUID_TITLE\n"
+            "Head\n"
+            + F(3, 2600.0, "8.50000E8", 0.24, 0.0, 0.0, "2.20000E9") + "\n"
+            + F(0.1, "1.00000E20") + "\n"
+            "*ELEMENT_SPH\n"
+            "  193725       8    2.220812e-04\n"
+            "  193726       9   -5.000000e-08\n"
+            "*ELEMENT_SPH_VOLUME\n"
+            "  193727       8    4.000000e-08\n"
+            "*END\n")
+
+    def test_detect_gelatin_bird_si(self):
+        v = detect(_write(self.DECK))
+        self.assertEqual(v.system, SI)
+        self.assertFalse(v.ambiguous, v.table())
+        self.assertTrue(any("material density 938" in e for e in v.evidence),
+                        v.evidence)
+
+    def test_sph_to_ton(self):
+        p = _write(self.DECK)
+        out = p + ".o.k"
+        ctx = convert(p, SI, TON, out, verify_roundtrip=True)
+        lines = _lines(out)
+        # CONTROL_SPH: DT/START are times (factor 1 here), MAXV x1000
+        ci = lines.index("*CONTROL_SPH")
+        c1 = lines[ci + 1]
+        self.assertEqual(c1[20:30], "1.00000E20")           # DT untouched
+        self.assertAlmostEqual(float(c1[60:70]), 0.002)     # START
+        self.assertAlmostEqual(float(c1[70:80]), 1.0e18)    # MAXV mm/s
+        self.assertEqual(int(lines[ci + 2][70:80]), 100)    # ISYMP percent
+        # SECTION_SPH: CSLH/HMIN/HMAX factors stay, SPHINI m -> mm
+        si = lines.index("bird") + 1
+        self.assertAlmostEqual(float(lines[si][10:20]), 1.2)   # CSLH
+        self.assertAlmostEqual(float(lines[si][20:30]), 0.2)   # HMIN
+        self.assertAlmostEqual(float(lines[si][30:40]), 2.0)   # HMAX
+        self.assertAlmostEqual(float(lines[si][40:50]), 5.0)   # SPHINI mm
+        # MAT_ELASTIC_FLUID: RO/E/K/CP scaled, PR/VC untouched
+        mi = lines.index("Head") + 1
+        self.assertAlmostEqual(float(lines[mi][10:20]), 2.6e-9)   # RO
+        self.assertAlmostEqual(float(lines[mi][20:30]), 850.0)    # E MPa
+        self.assertAlmostEqual(float(lines[mi][30:40]), 0.24)     # PR
+        self.assertAlmostEqual(float(lines[mi][60:70]), 2200.0)   # K MPa
+        self.assertAlmostEqual(float(lines[mi + 1][0:10]), 0.1)   # VC
+        self.assertAlmostEqual(float(lines[mi + 1][10:20]), 1e14) # CP MPa
+        # ELEMENT_SPH: positive = mass x1e-3; negative = volume x1e9;
+        # VOLUME option = volume regardless of sign; i8,i8,e16 + pad trick
+        ei = lines.index("*ELEMENT_SPH")
+        self.assertEqual(lines[ei + 1][0:16], "  193725       8")
+        self.assertAlmostEqual(float(lines[ei + 1][16:32]), 2.220812e-7)
+        self.assertEqual(lines[ei + 1][16:32].rstrip(),
+                         lines[ei + 1][16:30])
+        self.assertAlmostEqual(float(lines[ei + 2][16:32]), -50.0)
+        vi = lines.index("*ELEMENT_SPH_VOLUME")
+        self.assertAlmostEqual(float(lines[vi + 1][16:32]), 40.0)
+        self.assertTrue(ctx.self_check.startswith("OK"), ctx.self_check)
+        self.assertTrue(ctx.roundtrip.startswith("OK"), ctx.roundtrip)
+
+    def test_sph_times_to_ms(self):
+        p = _write(self.DECK)
+        out = p + ".o.k"
+        convert(p, SI, parse_system("kg-mm-ms"), out, self_check=False)
+        lines = _lines(out)
+        c1 = lines[lines.index("*CONTROL_SPH") + 1]
+        self.assertAlmostEqual(float(c1[20:30]), 1.0e23)    # DT s -> ms
+        self.assertAlmostEqual(float(c1[60:70]), 2.0)       # START
+        self.assertAlmostEqual(float(c1[70:80]), 1.0e15)    # MAXV m/s == mm/ms
+        sec = lines[lines.index("bird") + 1]
+        self.assertAlmostEqual(float(sec[50:60]), 1.0e23)   # DEATH
+        self.assertAlmostEqual(float(sec[60:70]), 1.0)      # START
+
+    def test_mat_elastic_fluid_negative_e_refused(self):
+        deck = self.DECK.replace("8.50000E8", "   -101.0")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "E < 0"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
+
+
 if __name__ == "__main__":
     unittest.main()
