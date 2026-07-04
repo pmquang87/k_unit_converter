@@ -6,7 +6,8 @@ Evidence, strongest first:
   3. detonation velocities (HE burn D ~ 4000-9000 m/s)
   4. *ICFD_MAT fluid density / dynamic viscosity (water ~1000 kg/m^3 /
      1e-3 Pa*s, air ~1.225 / 1.81e-5)
-  5. gravity-shaped *LOAD_BODY curve ordinates (9.80665 m/s^2)
+  5. gravity-shaped *LOAD_BODY curve ordinates and *LOAD_GRAVITY_PART
+     ACCEL values (9.80665 m/s^2)
   6. header comments ('Unit system : m, kg, sec, Pa')
 Each candidate system gets a score; the ranked table plus the winning system
 are returned. Ambiguity (top two closer than 20%) -> caller should demand an
@@ -105,6 +106,8 @@ def detect(path: str, follow_includes: bool = True) -> Verdict:
                     ords.append(abs(float(v)))
             if ords and max(ords) > 0 and min(ords) / max(ords) > 0.99:
                 gravities.append(max(ords))
+    # *LOAD_GRAVITY_PART ACCEL values are accelerations near g directly
+    gravities.extend(ctx.probes.get("gravity_accels", []))
 
     # header comment declaration (main file only)
     header_sys: Optional[UnitSystem] = None
@@ -194,7 +197,7 @@ def detect(path: str, follow_includes: bool = True) -> Verdict:
     for vis in icfd_viss[:4]:
         evidence.append(f"ICFD dynamic viscosity {vis:g}")
     for g in gravities[:2]:
-        evidence.append(f"gravity-curve ordinate {g:g}")
+        evidence.append(f"gravity acceleration {g:g}")
     if len(files) > 1:
         evidence.append(f"evidence gathered across {len(files)} files "
                         "(includes followed)")

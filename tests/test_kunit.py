@@ -926,5 +926,273 @@ class SphTests(unittest.TestCase):
             convert(p, SI, TON, p + ".o.k", self_check=False)
 
 
+KGMM = parse_system("kg-mm-ms")
+
+
+class RandomFatigueTests(unittest.TestCase):
+    """Random-vibration fatigue keywords (R16 Vol I p.16-94, p.23-63,
+    p.33-57; Vol II p.2-92), kg-mm-ms -> ton-mm-s (time unit changes)."""
+
+    def _conv(self, deck, **kw):
+        p = _write(deck)
+        out = p + ".o.k"
+        ctx = convert(p, KGMM, TON, out, self_check=False, **kw)
+        return _lines(out), ctx
+
+    GRAV = ("*KEYWORD\n*LOAD_GRAVITY_PART\n"
+            + F(1, 3, 5, 0.0098, 0, 0, 0) + "\n"
+            + F(2, 3, 0, 0.0098, 0, 0, 0) + "\n"
+            "*DEFINE_CURVE\n" + F(5, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+            + F("0.0", w=20) + F("1.0", w=20) + "\n"
+            + F("100.0", w=20) + F("1.0", w=20) + "\n"
+            "*MAT_ELASTIC\n"
+            + F(1, "7.85000-6", 209.0, 0.3, 0.0, 0.0, 0) + "\n"
+            "*END\n")
+
+    def test_load_gravity_part(self):
+        # R16 Vol I p.33-57: ACCEL is an acceleration, LC a factor-vs-time
+        # curve (dimensionless ordinate, Remark 1)
+        lines, ctx = self._conv(self.GRAV)
+        gi = lines.index("*LOAD_GRAVITY_PART")
+        self.assertAlmostEqual(float(lines[gi + 1][30:40]), 9800.0)
+        self.assertAlmostEqual(float(lines[gi + 2][30:40]), 9800.0)
+        ci = lines.index("*DEFINE_CURVE")
+        self.assertAlmostEqual(float(lines[ci + 2][20:40]), 1.0)  # factor
+        self.assertAlmostEqual(float(lines[ci + 3][0:20]), 0.1)   # ms -> s
+        self.assertFalse(any("unreferenced" in w for w in ctx.warnings),
+                         ctx.warnings)
+
+    def test_detect_gravity_accel(self):
+        v = detect(_write(self.GRAV))
+        self.assertEqual(v.system, KGMM)
+        self.assertFalse(v.ambiguous, v.table())
+        self.assertTrue(any("gravity acceleration 0.0098" in e
+                            for e in v.evidence), v.evidence)
+
+    def test_mat_add_fatigue_curve(self):
+        # LCID > 0: S-N curve is N (cycles) vs S (stress), Vol II p.2-96
+        deck = ("*KEYWORD\n*MAT_ADD_FATIGUE\n"
+                + F(1, 2, 0, 0.0, 0.0, 0.0, 0, 0) + "\n"
+                "*DEFINE_CURVE_TITLE\nSteel SN\n"
+                + F(2, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("10.0", w=20) + F("0.8", w=20) + "\n"
+                + F("1.0000000e+07", w=20) + F("0.35", w=20) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        ci = lines.index("Steel SN")
+        self.assertAlmostEqual(float(lines[ci + 2][0:20]), 10.0)    # cycles
+        self.assertAlmostEqual(float(lines[ci + 2][20:40]), 800.0)  # GPa->MPa
+        self.assertAlmostEqual(float(lines[ci + 3][0:20]), 1.0e7)
+        self.assertAlmostEqual(float(lines[ci + 3][20:40]), 350.0)
+        self.assertFalse(any("unreferenced" in w for w in ctx.warnings),
+                         ctx.warnings)
+
+    def test_mat_add_fatigue_equations(self):
+        # LCID < 0 predefined S-N equations, Vol II p.2-94..2-96
+        deck = ("*KEYWORD\n*MAT_ADD_FATIGUE\n"
+                + F(1, -1, 0, "1.0E15", 5.0, 0.2, 0, 0) + "\n"
+                + F("", "", "", "2.0E13", 4.0, 0.1) + "\n"     # segment card
+                "*MAT_ADD_FATIGUE\n"
+                + F(2, -2, 0, 3.0, 0.1, 0.2, 0, 0) + "\n"
+                "*MAT_ADD_FATIGUE\n"
+                + F(3, -3, 0, 1.5, -0.1, 0.2, 0, 0) + "\n"
+                "*MAT_ADD_FATIGUE\n"
+                + F(4, -4, 0, 1.5, 0.05, 0.2, 0, 0) + "\n*END\n")
+        lines, _ = self._conv(deck)
+        mi = [i for i, l in enumerate(lines) if l == "*MAT_ADD_FATIGUE"]
+        c = lines[mi[0] + 1]                    # N*S^b = a: A x (1e3)^B
+        self.assertAlmostEqual(float(c[30:40]) / 1e30, 1.0)
+        self.assertAlmostEqual(float(c[40:50]), 5.0)          # B unchanged
+        self.assertAlmostEqual(float(c[50:60]), 200.0)        # STHRES
+        seg = lines[mi[0] + 2]
+        self.assertAlmostEqual(float(seg[30:40]) / 1e25, 2.0)  # x (1e3)^4
+        self.assertAlmostEqual(float(seg[50:60]), 100.0)
+        c = lines[mi[1] + 1]                    # log(S) = a - b log(N)
+        self.assertAlmostEqual(float(c[30:40]), 6.0)          # a + log10(1e3)
+        self.assertAlmostEqual(float(c[40:50]), 0.1)          # b unchanged
+        c = lines[mi[2] + 1]                    # S = a*N^b
+        self.assertAlmostEqual(float(c[30:40]), 1500.0)
+        self.assertAlmostEqual(float(c[40:50]), -0.1)
+        c = lines[mi[3] + 1]                    # S = a - b log(N)
+        self.assertAlmostEqual(float(c[30:40]), 1500.0)
+        self.assertAlmostEqual(float(c[40:50]), 50.0)
+
+    def test_mat_add_fatigue_noninteger_b_refused(self):
+        deck = ("*KEYWORD\n*MAT_ADD_FATIGUE\n"
+                + F(1, -1, 0, "1.0E15", 5.5, 0.2, 0, 0) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "non-integer B"):
+            convert(p, KGMM, TON, p + ".o.k", self_check=False)
+
+    def test_mat_add_fatigue_en(self):
+        deck = ("*KEYWORD\n*MAT_ADD_FATIGUE_EN\n"
+                + F(1, 1.2, 0.2, 1.1, 0.5, -0.1, -0.6) + "\n"
+                + F(209.0, 0.3) + "\n*END\n")
+        lines, _ = self._conv(deck)
+        mi = lines.index("*MAT_ADD_FATIGUE_EN")
+        c = lines[mi + 1]
+        self.assertAlmostEqual(float(c[10:20]), 1200.0)       # KP
+        self.assertAlmostEqual(float(c[20:30]), 0.2)          # NP
+        self.assertAlmostEqual(float(c[30:40]), 1100.0)       # SIGMAF
+        self.assertAlmostEqual(float(c[40:50]), 0.5)          # EPSP strain
+        self.assertAlmostEqual(float(lines[mi + 2][0:10]), 209000.0)  # E
+
+    # legacy R8/R10 layout as written by LS-PrePost 4.5 (fatigue data on
+    # Cards 1/3/4 instead of R16's Card 7)
+    RV_LEGACY = ("*KEYWORD\n"
+                 "*FREQUENCY_DOMAIN_RANDOM_VIBRATION_FATIGUE\n"
+                 + F(1, 10, 0.0, 90000.0, 0, 1, 0, 0) + "\n"
+                 + F(0.03, 8, 0, 0.002, 3.0, 0) + "\n"
+                 + F(1, 1, 0, 0.0, 1, 1, 1, -999) + "\n"
+                 + F(0, 0, 0, 0.0, "1.440000E7", 0, 0, 1.0) + "\n"
+                 + F(0, 0, 2, 1, 0, 0, 0, 0) + "\n"
+                 "*DEFINE_CURVE_TITLE\nPSD Acceleration\n"
+                 + F(1, 0, 1.0, 2.0, 0.0, 0.0, 0, 0) + "\n"
+                 + F("0.1", w=20) + F("0.15", w=20) + "\n"
+                 + F("2.0", w=20) + F("0.08", w=20) + "\n"
+                 "*DEFINE_CURVE\n"
+                 + F(8, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                 + F("0.05", w=20) + F("0.03", w=20) + "\n*END\n")
+
+    def test_freq_rv_legacy_fatigue(self):
+        lines, ctx = self._conv(self.RV_LEGACY, verify_roundtrip=True)
+        fi = lines.index("*FREQUENCY_DOMAIN_RANDOM_VIBRATION_FATIGUE")
+        c1 = lines[fi + 1]
+        self.assertAlmostEqual(float(c1[30:40]), 9.0e7)       # FNMAX x1e3
+        self.assertEqual(int(c1[50:60]), 1)                   # MFTG intact
+        c2 = lines[fi + 2]
+        self.assertAlmostEqual(float(c2[0:10]), 0.03)         # DAMPF ratio
+        self.assertAlmostEqual(float(c2[30:40]), 2.0)         # DMPMAS 1/t
+        self.assertAlmostEqual(float(c2[40:50]), 0.003)       # DMPSTF t
+        c3 = lines[fi + 3]
+        self.assertEqual(int(c3[70:80]), -999)                # NFTG intact
+        c4 = lines[fi + 4]
+        self.assertAlmostEqual(float(c4[40:50]), 14400.0)     # TEXPOS ms->s
+        self.assertAlmostEqual(float(c4[70:80]), 1.0)         # STRSF factor
+        # PSD curve: abscissa cycles/ms -> cycles/s, ordinate accel^2/freq
+        pi = lines.index("PSD Acceleration")
+        self.assertAlmostEqual(float(lines[pi + 2][0:20]), 100.0)
+        self.assertAlmostEqual(float(lines[pi + 2][20:40]), 1.5e8)
+        self.assertAlmostEqual(float(lines[pi + 3][0:20]), 2000.0)
+        self.assertAlmostEqual(float(lines[pi + 3][20:40]), 8.0e7)
+        # LCDAM (LCTYP=0): frequency abscissa, dimensionless ratio ordinate
+        di = lines.index("*DEFINE_CURVE")
+        self.assertAlmostEqual(float(lines[di + 2][0:20]), 50.0)
+        self.assertAlmostEqual(float(lines[di + 2][20:40]), 0.03)
+        self.assertTrue(ctx.roundtrip.startswith("OK"), ctx.roundtrip)
+        self.assertFalse(any("unreferenced" in w for w in ctx.warnings),
+                         ctx.warnings)
+
+    def test_freq_rv_r16_fatigue(self):
+        deck = ("*KEYWORD\n"
+                "*FREQUENCY_DOMAIN_RANDOM_VIBRATION_FATIGUE\n"
+                + F(1, 10, 0.05, 3.0, 0) + "\n"
+                + F(0.02, 0, 0, 0.0, 0.0, 0) + "\n"
+                + F(1, 1, 0, 0.0, 1, 1, 1, 1) + "\n"           # NAPSD/NCPSD=1
+                + F(0, 0, 0, 0.0, "", 0, 0, 0.1) + "\n"
+                + F(0, 0, 2, 11, 0, 0, 0, 0) + "\n"            # Card 5
+                + F(1, 1, 1, 12, 13) + "\n"                    # Card 6, phase
+                + F(1, 2, 0, "3.60000E6", 1.0, 0, 3.0) + "\n"  # Card 7
+                + F(1, 21, 0, 0, "", "", "", 0) + "\n"         # 7.1a LCID>0
+                + F(2, -4, 0, "", 1.5, 0.05, 0.2, 0) + "\n"    # 7.1b LCID=-4
+                "*DEFINE_CURVE\n" + F(11, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("0.1", w=20) + F("0.2", w=20) + "\n"
+                "*DEFINE_CURVE\n" + F(12, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("0.1", w=20) + F("0.2", w=20) + "\n"
+                "*DEFINE_CURVE\n" + F(13, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("0.1", w=20) + F("30.0", w=20) + "\n"
+                "*DEFINE_CURVE\n" + F(21, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("1000.0", w=20) + F("0.4", w=20) + "\n*END\n")
+        lines, ctx = self._conv(deck, verify_roundtrip=True)
+        fi = lines.index("*FREQUENCY_DOMAIN_RANDOM_VIBRATION_FATIGUE")
+        self.assertAlmostEqual(float(lines[fi + 1][20:30]), 50.0)   # FNMIN
+        self.assertAlmostEqual(float(lines[fi + 1][30:40]), 3000.0)
+        c7 = lines[fi + 7]
+        self.assertAlmostEqual(float(c7[30:40]), 3600.0)      # TEXPOS
+        self.assertAlmostEqual(float(c7[60:70]), 3.0)         # SRANGE factor
+        b = lines[fi + 9]                                     # Card 7.1b
+        self.assertAlmostEqual(float(b[40:50]), 1500.0)       # A
+        self.assertAlmostEqual(float(b[50:60]), 50.0)         # B
+        self.assertAlmostEqual(float(b[60:70]), 200.0)        # STHRES
+        cs = [i for i, l in enumerate(lines) if l == "*DEFINE_CURVE"]
+        self.assertAlmostEqual(float(lines[cs[0] + 2][0:20]), 100.0)
+        self.assertAlmostEqual(float(lines[cs[0] + 2][20:40]), 2.0e8)
+        self.assertAlmostEqual(float(lines[cs[1] + 2][20:40]), 2.0e8)
+        self.assertAlmostEqual(float(lines[cs[2] + 2][0:20]), 100.0)
+        self.assertAlmostEqual(float(lines[cs[2] + 2][20:40]), 30.0)  # phase
+        self.assertAlmostEqual(float(lines[cs[3] + 2][0:20]), 1000.0)
+        self.assertAlmostEqual(float(lines[cs[3] + 2][20:40]), 400.0)
+        self.assertTrue(ctx.roundtrip.startswith("OK"), ctx.roundtrip)
+
+    def test_freq_rv_unit_flag_refused(self):
+        deck = ("*KEYWORD\n*FREQUENCY_DOMAIN_RANDOM_VIBRATION\n"
+                + F(1, 10, 0.0, 100.0, 0) + "\n"
+                + F(0.02, 0, 0, 0.0, 0.0, 0) + "\n"
+                + F(1, 1, 1, 9.81, 0, 0, 1, 0) + "\n"          # UNIT=1
+                + F(0, 0, 0, 0.0, "", 0, 0, 0.1) + "\n"
+                + F(0, 0, 2, 11, 0, 0, 0, 0) + "\n"
+                "*DEFINE_CURVE\n" + F(11, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("0.1", w=20) + F("0.2", w=20) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "UNIT=1"):
+            convert(p, KGMM, TON, p + ".o.k", self_check=False)
+
+    def test_freq_rv_wave_vaflag_refused(self):
+        deck = ("*KEYWORD\n*FREQUENCY_DOMAIN_RANDOM_VIBRATION\n"
+                + F(1, 10, 0.0, 100.0, 0) + "\n"
+                + F(0.02, 0, 0, 0.0, 0.0, 0) + "\n"
+                + F(5, 1, 0, 0.0, 0, 0, 1, 0) + "\n"           # VAFLAG=5
+                + F(0, 0, 0, 0.0, "", 0, 0, 0.1) + "\n"
+                + F(0, 2, 2, 11, 0, 0, 0, 0) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "VAFLAG=5"):
+            convert(p, KGMM, TON, p + ".o.k", self_check=False)
+
+    def test_freq_rv_legacy_nftg_refused(self):
+        deck = self.RV_LEGACY.replace(
+            F(1, 1, 0, 0.0, 1, 1, 1, -999), F(1, 1, 0, 0.0, 1, 1, 1, 2))
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "NFTG=2"):
+            convert(p, KGMM, TON, p + ".o.k", self_check=False)
+
+    def test_freq_rv_card_count_refused(self):
+        deck = ("*KEYWORD\n*FREQUENCY_DOMAIN_RANDOM_VIBRATION\n"
+                + F(1, 10, 0.0, 100.0, 0) + "\n"
+                + F(0.02, 0, 0, 0.0, 0.0, 0) + "\n"
+                + F(1, 1, 0, 0.0, 0, 0, 2, 0) + "\n"           # NAPSD=2
+                + F(0, 0, 0, 0.0, "", 0, 0, 0.1) + "\n"
+                + F(0, 0, 2, 0, 0, 0, 0, 0) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "refusing to guess"):
+            convert(p, KGMM, TON, p + ".o.k", self_check=False)
+
+    def test_database_frequency_binary(self):
+        # regression: BINARY flag must NOT be scaled as a dt (p.16-96);
+        # D3PSD Card 2b FMIN/FMAX are cycles/time (p.16-98)
+        deck = ("*KEYWORD\n*DATABASE_FREQUENCY_BINARY_D3FTG\n"
+                + F(1) + "\n"
+                "*DATABASE_FREQUENCY_BINARY_D3PSD\n"
+                + F(1) + "\n" + F(0.1, 2.0, 5, 0, 0) + "\n"
+                "*DATABASE_FREQUENCY_BINARY_D3RMS\n"
+                + F(1, 3) + "\n*END\n")
+        lines, _ = self._conv(deck)
+        i = lines.index("*DATABASE_FREQUENCY_BINARY_D3FTG")
+        self.assertEqual(int(lines[i + 1][0:10]), 1)
+        i = lines.index("*DATABASE_FREQUENCY_BINARY_D3PSD")
+        self.assertEqual(int(lines[i + 1][0:10]), 1)
+        self.assertAlmostEqual(float(lines[i + 2][0:10]), 100.0)
+        self.assertAlmostEqual(float(lines[i + 2][10:20]), 2000.0)
+        self.assertEqual(int(lines[i + 2][20:30]), 5)         # NFREQ
+        i = lines.index("*DATABASE_FREQUENCY_BINARY_D3RMS")
+        self.assertEqual(int(lines[i + 1][0:10]), 1)
+        self.assertEqual(int(lines[i + 1][10:20]), 3)         # SF factor
+
+    def test_database_frequency_lcfreq_refused(self):
+        deck = ("*KEYWORD\n*DATABASE_FREQUENCY_BINARY_D3PSD\n"
+                + F(1) + "\n" + F(0.1, 2.0, 5, 0, 44) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "LCFREQ=44"):
+            convert(p, KGMM, TON, p + ".o.k", self_check=False)
+
+
 if __name__ == "__main__":
     unittest.main()

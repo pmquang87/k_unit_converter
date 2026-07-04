@@ -45,7 +45,8 @@ class Ctx:
         self.torsional_mats: Set[int] = set()
         self.smat_blocks: List[Tuple[KFile, Block, str]] = []
         self.probes: Dict[str, list] = {"ro": [], "e": [], "d": [],
-                                        "gravity_lcids": []}
+                                        "gravity_lcids": [],
+                                        "gravity_accels": []}
         self.unknown: Dict[str, int] = {}
         self.soft: Dict[str, str] = {}
         self.hard: Dict[str, str] = {}

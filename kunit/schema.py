@@ -14,14 +14,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field as dfield
 from decimal import Decimal
+from fractions import Fraction
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .parser import STD8, Block, KFile, format_fixed, parse_number
-from .units import (ACCEL, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC, DENSITY,
-                    Dim, DIM_NAMES, DIMLESS, FORCE, FREQ, INERTIA, L4, LENGTH,
-                    MASS, MASS_AREA, MASS_LEN, MOMENT, PRESSURE, PWR_VOL, RATE,
+from .units import (ACCEL, ACCEL_PSD, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC,
+                    DENSITY, Dim, DIM_NAMES, DIMLESS, DISP_PSD, FORCE,
+                    FORCE_PSD, FREQ, INERTIA, L4, LENGTH,
+                    MASS, MASS_AREA, MASS_LEN, MOMENT, PRES_PSD, PRESSURE,
+                    PWR_VOL, RATE,
                     ROT_DAMP, SPEC_HEAT, STIFF, STIFF_LEN, STRESS_M3, TEMP,
-                    THERM_COND, TIME, VELOCITY, VISCOSITY, VOLUME,
+                    THERM_COND, TIME, VEL_PSD, VELOCITY, VISCOSITY, VOLUME,
                     BLAST_BUILTIN_UNITS, BLAST_UNIT_SYSTEMS, CSCM_UNITS,
                     CSCM_UNIT_SYSTEMS, blast_unit5_factors)
 
@@ -1066,6 +1069,397 @@ def h_mat_cscm(block: Block, ctx, edit: bool) -> None:
     ctx.count(block.name + f" (UNITS->{new_units})")
 
 
+def h_load_gravity_part(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.33-57..33-58 (*LOAD_GRAVITY_PART[_SET]): repeating cards
+    PID/PSID DOF LC ACCEL LCDR STGA STGR.  ACCEL is the gravity acceleration;
+    LC and LCDR are load curves of a dimensionless FACTOR versus time that
+    multiplies ACCEL (Remark 1: "Curve LC gives factor as a function of
+    time"), so only ACCEL rescales.  STGA/STGR are construction-stage ids.
+    ACCEL values also feed unit detection (they sit near 9.80665 m/s^2)."""
+    kf = ctx.kf
+    for li in block.data:
+        if not edit:
+            for fi in (2, 4):                             # LC, LCDR
+                lcid = _numint(kf, li, STD8, block.long, fi)
+                if lcid:
+                    ctx.register_curve(lcid, TIME, DIMLESS,
+                                       block.name + " factor curve")
+            v = kf.get_number(li, STD8, block.long, 3)
+            if v:
+                ctx.probes["gravity_accels"].append(abs(float(v)))
+        else:
+            kf.scale_field(li, STD8, block.long, 3, ctx.fac(ACCEL))
+    if edit:
+        ctx.count(block.name)
+
+
+def _exact_pow10(f: Fraction) -> Optional[int]:
+    """k when f == 10**k exactly, else None."""
+    num, den = f.numerator, f.denominator
+    if den != 1:
+        if num != 1:
+            return None
+        k = _exact_pow10(Fraction(den))
+        return -k if k is not None else None
+    k = 0
+    while num % 10 == 0:
+        num //= 10
+        k += 1
+    return k if num == 1 else None
+
+
+def _scale_sn_fields(block: Block, ctx, li: int, lcid: int,
+                     fis: Tuple[int, int, int], what: str) -> None:
+    """Rescale one A/B/STHRES record of a predefined S-N equation.
+
+    R16 Vol II p.2-94..2-96 and Vol I p.23-73..23-79 (identical equations):
+      LCID=-1:  N*S^b = a          ->  [a] = stress^b,  b dimensionless
+      LCID=-2:  log(S) = a - b*log(N) -> a shifts by log10(stress factor),
+                                         b dimensionless (log-log slope)
+      LCID=-3:  S = a*N^b          ->  [a] = stress,    b dimensionless
+      LCID=-4:  S = a - b*log(N)   ->  [a] = [b] = stress
+    with S the stress amplitude/range and N the cycle count.  STHRES is a
+    threshold stress in every form.  SNTYPE (range vs amplitude) and LTYPE
+    (interpolation) never change the dimensions.
+    """
+    kf = ctx.kf
+    a_fi, b_fi, s_fi = fis
+    fs = ctx.fac(PRESSURE)
+    kf.scale_field(li, STD8, block.long, s_fi, fs)        # STHRES
+    if lcid == -3:
+        kf.scale_field(li, STD8, block.long, a_fi, fs)
+    elif lcid == -4:
+        kf.scale_field(li, STD8, block.long, a_fi, fs)
+        kf.scale_field(li, STD8, block.long, b_fi, fs)
+    elif lcid == -1:
+        b = kf.get_number(li, STD8, block.long, b_fi)
+        if b is None or b == int(b):
+            kf.scale_field(li, STD8, block.long, a_fi, fs ** int(b or 0))
+        else:
+            ctx.error(f"*{block.name}: {what} uses LCID=-1 (N*S^b = a) with "
+                      f"non-integer B={b}; A scales by (stress factor)^B, "
+                      "which cannot be applied exactly - convert this S-N "
+                      "definition manually.")
+    elif lcid == -2:
+        k = _exact_pow10(fs)
+        if k is None:
+            ctx.error(f"*{block.name}: {what} uses LCID=-2 (log(S) = a - "
+                      "b*log(N)); A shifts by log10(stress factor), which is "
+                      f"not an integer for this unit pair (factor {fs}) - "
+                      "convert this S-N definition manually.")
+            return
+        v = kf.get_number(li, STD8, block.long, a_fi)
+        if v is not None and k:
+            w = 20 if block.long else 10
+            s, rel = format_fixed(v + k, w)
+            kf.max_fmt_err = max(kf.max_fmt_err, rel)
+            kf.set_field(li, STD8, block.long, a_fi, s)
+    else:
+        ctx.error(f"*{block.name}: {what} has LCID={lcid}, which is not a "
+                  "documented S-N equation id (-1..-4) - refusing to guess.")
+
+
+def h_mat_add_fatigue(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol II p.2-92..2-97 (*MAT_ADD_FATIGUE[_EN]).
+
+    <BLANK> option, LCID > 0 (Card 1a MID LCID LTYPE - - - SNLIMT SNTYPE):
+    the S-N data lives in *DEFINE_CURVE LCID with abscissa N (cycles to
+    failure, dimensionless) and ordinate S (stress) per Remark 1 (p.2-96).
+    LCID < 0 (Card 1b MID LCID LTYPE A B STHRES SNLIMT SNTYPE, plus up to 7
+    segment cards "- - - Ai Bi STHRESi", p.2-95) selects a predefined
+    equation handled by _scale_sn_fields.
+    EN option (Card 1c MID KP NP SIGMAF EPSP BP CP): KP (cyclic strength
+    coefficient) and SIGMAF (fatigue strength coefficient) are stresses; NP,
+    BP, CP are exponents and EPSP a strain (dimensionless).  Optional Card 2b
+    E PR carries a modulus."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    if "EN" in block.name.split("_"):
+        if edit:
+            for fi in (1, 3):                             # KP, SIGMAF
+                kf.scale_field(data[0], STD8, block.long, fi,
+                               ctx.fac(PRESSURE))
+            if len(data) > 1:                             # Card 2b: E PR
+                kf.scale_field(data[1], STD8, block.long, 0,
+                               ctx.fac(PRESSURE))
+            ctx.count(block.name)
+        return
+    lcid = _numint(kf, data[0], STD8, block.long, 1)
+    if lcid is None:
+        lcid = -1                                         # manual default
+    if lcid > 0:
+        if not edit:
+            ctx.register_curve(lcid, DIMLESS, PRESSURE,
+                               block.name + " S-N (cycles vs stress)")
+            return
+        if len(data) > 1:
+            ctx.warn(f"*{block.name}: LCID={lcid} > 0 but {len(data) - 1} "
+                     "extra card(s) present - segment cards are only read "
+                     "for LCID < 0 (R16 Vol II p.2-92); left unchanged, "
+                     "verify.")
+        ctx.count(block.name)
+        return
+    if not edit:
+        return
+    for i, li in enumerate(data):
+        _scale_sn_fields(block, ctx, li, lcid, (3, 4, 5),
+                         "Card 1b" if i == 0 else f"segment card {i}")
+    ctx.count(block.name)
+
+
+# *FREQUENCY_DOMAIN_RANDOM_VIBRATION base-quantity by VAFLAG (R16 Vol I
+# p.23-66); the PSD ordinate is (base quantity)^2 per (cycles/time).
+_RV_BASE_DIM: Dict[int, Optional[Dim]] = {
+    0: None,                        # no random vibration analysis
+    1: ACCEL, 11: ACCEL,            # base / enforced acceleration
+    2: PRESSURE, 3: PRESSURE,       # random pressure / plane wave
+    8: FORCE,                       # nodal force
+    9: VELOCITY, 12: VELOCITY,      # base / enforced velocity
+    10: LENGTH, 13: LENGTH,         # base / enforced displacement
+}
+_RV_PSD_DIM: Dict[Dim, Dim] = {
+    ACCEL: ACCEL_PSD, VELOCITY: VEL_PSD, LENGTH: DISP_PSD,
+    PRESSURE: PRES_PSD, FORCE: FORCE_PSD,
+}
+
+
+def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
+    """*FREQUENCY_DOMAIN_RANDOM_VIBRATION[_FATIGUE], R16 Vol I p.23-63..79.
+
+    R16 layout: Card1 MDMIN MDMAX FNMIN FNMAX RESTRT (FNMIN/FNMAX are natural
+    frequencies); Card2 DAMPF LCDAM LCTYP DMPMAS DMPSTF DMPTYP (DAMPF is the
+    modal damping ratio; DMPMAS/DMPSTF are the Rayleigh alpha [1/time] and
+    beta [time]; LCDAM's abscissa is a frequency for LCTYP=0 or a mode number
+    for LCTYP=1, ordinate dimensionless); Card3 VAFLAG METHOD UNIT UMLT VAPSD
+    VARMS NAPSD NCPSD; Card4 LDTYP IPANELU IPANELV TEMPER - LDFLAG ICOARSE
+    TCOARSE; NAPSD Card5s SID STYPE DOF LDPSD LDVEL LDFLW LDSPN CID; NCPSD
+    Card6s LOAD_I LOAD_J LCTYP2 LDPSD1 LDPSD2.  FATIGUE adds Card7 MFTG NFTG
+    STRTYP TEXPOS STRSF INFTG SRANGE (TEXPOS = exposure time; STRSF/SRANGE
+    are dimensionless factors), NFTG Card7.1s (7.1a PID LCID PTYPE LTYPE - -
+    - SNLIMT for LCID>0, 7.1b PID LCID PTYPE - A B STHRES SNLIMT for LCID<0,
+    equations as in _scale_sn_fields) and INFTG Card7.2 filename cards.
+
+    Legacy (LS-DYNA R8..R10, written by LS-PrePost <= 4.5 and identified by
+    its $# header comments) instead holds MFTG/RESTRM/INFTG on Card1 fields
+    6-8, NFTG on Card3 field 8 and TEXPOS/SNTYPE/STRSF on Card4 fields 5/7/8;
+    those Card1/Card4 fields are structurally blank in R16 and NCPSD cannot
+    be negative, so any number there identifies the legacy layout.  Only
+    NFTG=-999 (S-N data from *MAT_ADD_FATIGUE) is modelled for it: the
+    legacy in-block S-N card layout is not documented in the R16 manual.
+
+    All frequencies are model-unit cycles/time (the companion output card
+    *DATABASE_FREQUENCY_BINARY documents FMIN/FMAX as "cycles/time", R16
+    Vol I p.16-98, and Remark 7 p.23-76 defines acceleration as
+    [length]/[time]^2 for UNIT=0).  UNIT != 0 declares g-based PSD input;
+    the manual does not define what frequency unit those g^2/Hz ordinates
+    are per when the model time unit is not the second, so it is refused.
+    VAFLAG 4-7 (shock/progressive/reverberant/TBL waves) add an optional
+    PREF card and phase-velocity/decay curves that are not modelled; LDTYP=1
+    (SPL in dB) references an SI-flavoured default PREF - both refused."""
+    kf = ctx.kf
+    data = list(block.data)
+    fatigue = "FATIGUE" in block.name.split("_")
+    if len(data) < 4:
+        ctx.error(f"*{block.name}: expected at least Cards 1-4, found "
+                  f"{len(data)} data card(s).")
+        return
+    c1, c2, c3, c4 = data[:4]
+
+    def num(li, fi):
+        return kf.get_number(li, STD8, block.long, fi)
+
+    def iv(li, fi):
+        return _numint(kf, li, STD8, block.long, fi) or 0
+
+    vaflag = iv(c3, 0)
+    unit = iv(c3, 2)
+    napsd_raw = _numint(kf, c3, STD8, block.long, 6)
+    napsd = 1 if napsd_raw is None else max(napsd_raw, 0)  # default 1
+    f7 = _numint(kf, c3, STD8, block.long, 7)              # NCPSD | legacy NFTG
+    ldtyp = iv(c4, 0)
+
+    if vaflag in (4, 5, 6, 7):
+        ctx.error(f"*{block.name}: VAFLAG={vaflag} (shock/progressive/"
+                  "reverberant/TBL wave loading) is not modelled - it adds "
+                  "an optional PREF card (changing the card layout) and "
+                  "phase-velocity / decay curves (LDVEL/LDFLW/LDSPN) - "
+                  "convert manually.")
+        return
+    if vaflag not in _RV_BASE_DIM:
+        ctx.error(f"*{block.name}: VAFLAG={vaflag} is not documented "
+                  "(R16 Vol I p.23-66) - refusing to guess.")
+        return
+    if unit != 0:
+        ctx.error(f"*{block.name}: UNIT={unit} declares g-based acceleration "
+                  "input (R16 Vol I p.23-66..67); the manual does not define "
+                  "which frequency unit the g^2-per-frequency PSD ordinates "
+                  "are per when the model time unit is not the second, so "
+                  "the PSD curve cannot be rescaled safely - use model "
+                  "units (UNIT=0) or convert manually.")
+        return
+    if ldtyp == 1:
+        ctx.error(f"*{block.name}: LDTYP=1 (SPL input in dB) depends on a "
+                  "reference pressure with an SI-flavoured default "
+                  "(2.0E-5, Card 3.1 p.23-67) - not modelled, convert "
+                  "manually.")
+        return
+    if ldtyp not in (0, 2):
+        ctx.error(f"*{block.name}: LDTYP={ldtyp} is not documented "
+                  "(R16 Vol I p.23-68) - refusing to guess.")
+        return
+
+    legacy = fatigue and (any(num(c1, fi) for fi in (5, 6, 7))
+                          or (f7 or 0) < 0 or bool(num(c4, 4)))
+    base = _RV_BASE_DIM[vaflag]
+    psd = _RV_PSD_DIM.get(base)
+
+    # ── card-count plan ──────────────────────────────────────────────────
+    load_cards = data[4:4 + napsd]
+    if legacy:
+        nftg = f7 or 0
+        if nftg != -999:
+            ctx.error(f"*{block.name}: legacy (R8/R10) layout with "
+                      f"NFTG={nftg}: only NFTG=-999 (S-N data from "
+                      "*MAT_ADD_FATIGUE) is modelled - the legacy in-block "
+                      "S-N card layout is not documented in the R16 manual; "
+                      "port the deck to the R16 layout or convert manually.")
+            return
+        if iv(c1, 7):
+            ctx.error(f"*{block.name}: legacy (R8/R10) layout with "
+                      f"INFTG={iv(c1, 7)} appends initial-damage database "
+                      "cards whose legacy layout cannot be verified - "
+                      "convert manually.")
+            return
+        expected = 4 + napsd
+        cross_cards, c7, sn_cards = [], None, []
+    else:
+        ncpsd = f7 or 0
+        if ncpsd < 0:
+            ctx.error(f"*{block.name}: NCPSD={ncpsd} is invalid (cross-PSD "
+                      "count cannot be negative).")
+            return
+        cross_cards = data[4 + napsd:4 + napsd + ncpsd]
+        expected = 4 + napsd + ncpsd
+        c7, sn_cards = None, []
+        if fatigue:
+            if len(data) <= expected:
+                ctx.error(f"*{block.name}: FATIGUE option requires Card 7 "
+                          "after the load cards (R16 Vol I p.23-71) - "
+                          "not found.")
+                return
+            c7 = data[expected]
+            nftg_raw = _numint(kf, c7, STD8, block.long, 1)
+            nftg = 1 if nftg_raw is None else nftg_raw     # default 1
+            inftg = max(iv(c7, 5), 0)
+            n_sn = max(nftg, 0) if nftg != -999 else 0
+            sn_cards = data[expected + 1:expected + 1 + n_sn]
+            expected += 1 + n_sn + inftg                   # + 7.2 filenames
+    if len(data) != expected:
+        ctx.error(f"*{block.name}: found {len(data)} data cards but the "
+                  f"flags imply {expected} (NAPSD={napsd}"
+                  + ("" if legacy else f", NCPSD={f7 or 0}")
+                  + ") - the layout was not understood, refusing to guess.")
+        return
+
+    # ── scan pass: curve registration ────────────────────────────────────
+    if not edit:
+        lcdam = _numint(kf, c2, STD8, block.long, 1)
+        if lcdam:
+            lctyp = iv(c2, 2)
+            xdim = {0: FREQ, 1: DIMLESS}.get(lctyp)
+            if xdim is None:
+                ctx.error(f"*{block.name}: LCTYP={lctyp} is not documented "
+                          "(R16 Vol I p.23-65).")
+            else:
+                ctx.register_curve(lcdam, xdim, DIMLESS,
+                                   block.name + " LCDAM")
+        for li in load_cards:
+            ldpsd = _numint(kf, li, STD8, block.long, 3)
+            if ldpsd and base is not None:
+                if ldtyp == 0:
+                    ctx.register_curve(ldpsd, FREQ, psd,
+                                       block.name + " LDPSD")
+                else:                                      # LDTYP=2: history
+                    ctx.register_curve(ldpsd, TIME, base,
+                                       block.name + " LDPSD (time history)")
+            for fi, fname in ((4, "LDVEL"), (5, "LDFLW"), (6, "LDSPN")):
+                sub = _numint(kf, li, STD8, block.long, fi)
+                if sub:
+                    ctx.warn(f"*{block.name}: {fname}={sub} is only read "
+                             "for wave loading (VAFLAG=5..7) and is ignored "
+                             f"for VAFLAG={vaflag} - curve left unresolved.")
+        for li in cross_cards:
+            lctyp2 = iv(li, 2)
+            if base is None:
+                continue
+            ld1 = _numint(kf, li, STD8, block.long, 3)
+            ld2 = _numint(kf, li, STD8, block.long, 4)
+            if ld1:
+                ctx.register_curve(ld1, FREQ, psd, block.name + " LDPSD1")
+            if ld2:
+                ydim = psd if lctyp2 == 0 else DIMLESS     # phase angle
+                ctx.register_curve(ld2, FREQ, ydim, block.name + " LDPSD2")
+        for li in sn_cards:
+            sn_lcid = _numint(kf, li, STD8, block.long, 1) or 0
+            if sn_lcid > 0:
+                ctx.register_curve(sn_lcid, DIMLESS, PRESSURE,
+                                   block.name + " S-N (cycles vs stress)")
+        return
+
+    # ── edit pass: rescale fields ────────────────────────────────────────
+    for fi in (2, 3):                                      # FNMIN FNMAX
+        kf.scale_field(c1, STD8, block.long, fi, ctx.fac(FREQ))
+    kf.scale_field(c2, STD8, block.long, 3, ctx.fac(FREQ))  # DMPMAS (alpha)
+    kf.scale_field(c2, STD8, block.long, 4, ctx.fac(TIME))  # DMPSTF (beta)
+    if num(c4, 3):
+        ctx.note(f"*{block.name}: TEMPER left unchanged (temperatures are "
+                 "never rescaled)")
+    if legacy:
+        kf.scale_field(c4, STD8, block.long, 4, ctx.fac(TIME))   # TEXPOS
+    if c7 is not None:
+        kf.scale_field(c7, STD8, block.long, 3, ctx.fac(TIME))   # TEXPOS
+    for li in sn_cards:
+        sn_lcid = _numint(kf, li, STD8, block.long, 1) or 0
+        if sn_lcid < 0:
+            _scale_sn_fields(block, ctx, li, sn_lcid, (4, 5, 6), "Card 7.1b")
+    ctx.count(block.name + (" (legacy R8/R10 layout)" if legacy else ""))
+
+
+def h_database_frequency(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.16-94..16-100 (*DATABASE_FREQUENCY_BINARY_OPTION1_
+    {OPTION2}).  Card 1a BINARY SF - - PSETID holds flags plus the
+    dimensionless RMS-combination scale factor SF; only D3PSD and D3SSD read
+    the extra Card 2b FMIN FMAX NFREQ FSPACE LCFREQ, whose FMIN/FMAX are
+    output frequencies explicitly documented as cycles/time (p.16-98).
+    LCFREQ names a curve listing the output frequencies, but the manual does
+    not say which curve column carries them, so decks using it are refused.
+    The SUMMATION option replaces Card 1 with filename cards, D3ACC appends
+    node-id cards and BINARY=3 (D3RMS/D3SPCM) appends an ISTATE FILENAME
+    card - nothing dimensional in any of those."""
+    kf = ctx.kf
+    parts = block.name.split("_")
+    if "SUMMATION" in parts:
+        return
+    opt1 = parts[3] if len(parts) > 3 else ""
+    if opt1 not in ("D3PSD", "D3SSD"):
+        return
+    for li in block.data[1:]:              # Card 2b (repeats under SUBCASE)
+        lcfreq = _numint(kf, li, STD8, block.long, 4)
+        if lcfreq:
+            ctx.error(f"*{block.name}: LCFREQ={lcfreq} output-frequency "
+                      "curves are not modelled (the manual does not document "
+                      "which curve column holds the frequencies, R16 Vol I "
+                      "p.16-98) - use FMIN/FMAX/NFREQ or convert manually.")
+            continue
+        if edit:
+            for fi in (0, 1):                              # FMIN FMAX
+                kf.scale_field(li, STD8, block.long, fi, ctx.fac(FREQ))
+    if edit:
+        ctx.count(block.name)
+
+
 def h_cnrb_inertia(block: Block, ctx, edit: bool) -> None:
     if not edit:
         return
@@ -1127,6 +1521,12 @@ CUSTOM: Dict[str, Callable] = {
     "ELEMENT_SPH_VOLUME": h_element_sph,
     "LOAD_BLAST_ENHANCED": h_blast,
     "LOAD_BLAST": h_blast,
+    "LOAD_GRAVITY_PART": h_load_gravity_part,
+    "LOAD_GRAVITY_PART_SET": h_load_gravity_part,
+    "MAT_ADD_FATIGUE": h_mat_add_fatigue,
+    "MAT_ADD_FATIGUE_EN": h_mat_add_fatigue,
+    "FREQUENCY_DOMAIN_RANDOM_VIBRATION": h_freq_random_vibration,
+    "FREQUENCY_DOMAIN_RANDOM_VIBRATION_FATIGUE": h_freq_random_vibration,
     "LOAD_NODE_POINT": h_load_node_or_rb,
     "LOAD_NODE_SET": h_load_node_or_rb,
     "LOAD_RIGID_BODY": h_load_node_or_rb,
@@ -1184,6 +1584,10 @@ def resolve(name: str):
                 or "MPP" in name or "DAMPING" in name or "MORTAR" in name):
             return "unknown", None
         return "custom", h_contact
+    if name.startswith("DATABASE_FREQUENCY_BINARY"):
+        return "custom", h_database_frequency
+    if name.startswith("DATABASE_FREQUENCY_"):
+        return "unknown", None      # ASCII variants: layout not modelled
     if name.startswith("DATABASE_BINARY_"):
         tail = name[len("DATABASE_BINARY_"):]
         if tail in ("D3DUMP", "RUNRSF", "D3DRLF"):

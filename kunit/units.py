@@ -50,6 +50,12 @@ SPEC_HEAT : Dim = (0, 2, -2)     # specific heat, ASSUMING both systems share
 THERM_COND: Dim = (1, 1, -3)     # thermal conductivity W/(m*K), same
                                  # temperature-unit assumption as SPEC_HEAT
 # surface tension (force/length) shares STIFF's (1, 0, -2) signature
+# power-spectral densities: (base quantity)^2 per frequency = q^2 * time
+ACCEL_PSD : Dim = (0, 2, -3)     # acceleration PSD, accel^2/(cycles/time)
+VEL_PSD   : Dim = (0, 2, -1)     # velocity PSD
+DISP_PSD  : Dim = (0, 2, 1)      # displacement PSD
+PRES_PSD  : Dim = (2, -2, -3)    # pressure PSD
+FORCE_PSD : Dim = (2, 2, -3)     # force PSD
 
 # Sentinel: temperature values are never rescaled (K<->degC offsets make that
 # unsafe); fields marked TEMP are classified and reported, not converted.
@@ -67,6 +73,9 @@ DIM_NAMES = {
     STRESS_M3: "1/stress^3", PWR_VOL: "power/volume",
     SPEC_HEAT: "specific heat (same temp unit)",
     THERM_COND: "thermal conductivity (same temp unit)",
+    ACCEL_PSD: "PSD accel^2/freq", VEL_PSD: "PSD vel^2/freq",
+    DISP_PSD: "PSD disp^2/freq", PRES_PSD: "PSD pressure^2/freq",
+    FORCE_PSD: "PSD force^2/freq",
 }
 
 # names accepted by --curve LCID=<x>:<y> overrides
@@ -81,6 +90,8 @@ DIM_BY_NAME = {
     "force": FORCE, "moment": MOMENT, "energy": ENERGY,
     "stiffness": STIFF, "damping": DAMP, "viscosity": VISCOSITY,
     "powervol": PWR_VOL,
+    "accelpsd": ACCEL_PSD, "velpsd": VEL_PSD, "disppsd": DISP_PSD,
+    "prespsd": PRES_PSD, "forcepsd": FORCE_PSD,
 }
 
 
