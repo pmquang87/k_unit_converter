@@ -21,7 +21,8 @@ from .units import (ACCEL, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC, DENSITY,
                     MASS_AREA, MASS_LEN, MOMENT, PRESSURE, RATE, ROT_DAMP,
                     SPEC_HEAT, STIFF, STIFF_LEN, STRESS_M3, TEMP, TIME,
                     VELOCITY, VISCOSITY, BLAST_BUILTIN_UNITS,
-                    BLAST_UNIT_SYSTEMS, blast_unit5_factors)
+                    BLAST_UNIT_SYSTEMS, CSCM_UNITS, CSCM_UNIT_SYSTEMS,
+                    blast_unit5_factors)
 
 STRAIN = DIMLESS
 
@@ -204,6 +205,7 @@ _MAT_ALIASES = {
     "MAT_020": "MAT_RIGID", "MAT_022": "MAT_COMPOSITE_DAMAGE",
     "MAT_024": "MAT_PIECEWISE_LINEAR_PLASTICITY",
     "MAT_140": "MAT_VACUUM",
+    "MAT_159": "MAT_CSCM", "MAT_159_CONCRETE": "MAT_CSCM_CONCRETE",
     "MAT_S01": "MAT_SPRING_ELASTIC", "MAT_S02": "MAT_DAMPER_VISCOUS",
     "MAT_S03": "MAT_SPRING_ELASTOPLASTIC",
     "MAT_S04": "MAT_SPRING_NONLINEAR_ELASTIC",
@@ -745,6 +747,75 @@ def h_blast(block: Block, ctx, edit: bool) -> None:
         i += consumed
 
 
+def h_mat_cscm(block: Block, ctx, edit: bool) -> None:
+    """*MAT_CSCM[_CONCRETE] (MAT_159), R16 Vol II p.2-1081..2-1093.
+
+    CONCRETE variant: Card 1 MID RO NPLOT INCRE IRATE ERODE RECOV ITRETRC -
+    only RO is dimensional (INCRE is a strain increment, IRATE/ITRETRC are
+    flags, ERODE a principal-strain threshold/flag and RECOV a 0-1 / 10-11
+    recovery ratio, p.2-1082..83); Card 2 PRED (damage fraction); Card 3
+    FPC DAGG UNITS where FPC is a pressure, DAGG a length and UNITS declares
+    the unit system they are in (table on p.2-1084).  LS-DYNA fits the
+    concrete parameters internally from those three fields, so UNITS must be
+    remapped to the destination system's value - and the conversion must
+    abort when the destination has no UNITS value.
+
+    The user-defined <BLANK> variant (Cards 4-8, p.2-1084..2-1087) is
+    refused: the manual gives no units for CH (hardening rate) and the
+    ETA0C/ETA0T rate parameters have value-dependent dimensions (the
+    fluidity eta = ETA0x / rate^Nx is a time, p.2-1092), so a fixed
+    per-field factor table cannot scale it safely."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if "CONCRETE" not in block.name.split("_"):
+        if edit:
+            ctx.error(f"*{block.name}: user-defined MAT_159 input (Cards "
+                      "4-8) is not auto-convertible - the CH hardening rate "
+                      "has no documented units and ETA0C/ETA0T dimensions "
+                      "depend on the NC/NT values (R16 Vol II p.2-1085, "
+                      "p.2-1092) - convert this material manually.")
+        return
+    if len(data) < 3:
+        if edit:
+            ctx.error(f"*{block.name}: expected 3 cards (MID/RO..., PRED, "
+                      f"FPC/DAGG/UNITS), found {len(data)}.")
+        return
+    units = _numint(kf, data[2], STD8, block.long, 2) or 0
+    if not edit:
+        us = CSCM_UNIT_SYSTEMS.get(units)
+        if us is None:
+            ctx.warn(f"*{block.name}: UNITS={units} is not a documented "
+                     "MAT_159 value (0-4, R16 Vol II p.2-1084) - it will be "
+                     "rewritten to the destination system's value; verify "
+                     "the source deck.")
+        elif ctx.src is not None and us != ctx.src:
+            ctx.warn(f"*{block.name}: UNITS={units} declares {us.key} but "
+                     f"the deck is being converted as {ctx.src.key} - the "
+                     "flag and the model units disagree in the SOURCE deck. "
+                     "FPC/DAGG are scaled as MODEL units; verify.")
+        return
+    key = (ctx.dst.mass, ctx.dst.length, ctx.dst.time)
+    new_units = CSCM_UNITS.get(key)
+    if new_units is None:
+        supported = ", ".join(f"{v}={s.key}"
+                              for v, s in sorted(CSCM_UNIT_SYSTEMS.items()))
+        ctx.error(f"*{block.name}: MAT_159 auto-generates its concrete "
+                  "parameters from FPC/DAGG/UNITS, but the UNITS table "
+                  f"(R16 Vol II p.2-1084) has no value for {ctx.dst.key}. "
+                  f"Supported destinations: {supported}. Pick one of those "
+                  "target systems or convert this material manually.")
+        return
+    kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(DENSITY))   # RO
+    kf.scale_field(data[2], STD8, block.long, 0, ctx.fac(PRESSURE))  # FPC
+    kf.scale_field(data[2], STD8, block.long, 1, ctx.fac(LENGTH))    # DAGG
+    w = 20 if block.long else 10
+    kf.set_field(data[2], STD8, block.long, 2, str(new_units).rjust(w))
+    if len(data) > 3:
+        ctx.warn(f"*{block.name}: {len(data) - 3} trailing card(s) beyond "
+                 "the 3-card CONCRETE layout left unscaled - verify.")
+    ctx.count(block.name + f" (UNITS->{new_units})")
+
+
 def h_cnrb_inertia(block: Block, ctx, edit: bool) -> None:
     if not edit:
         return
@@ -816,6 +887,8 @@ CUSTOM: Dict[str, Callable] = {
     "MAT_DAMPER_VISCOUS": h_smat_damper_viscous,
     "MAT_SPRING_NONLINEAR_ELASTIC": h_smat_curve_mats,
     "MAT_DAMPER_NONLINEAR_VISCOUS": h_smat_curve_mats,
+    "MAT_CSCM": h_mat_cscm,
+    "MAT_CSCM_CONCRETE": h_mat_cscm,
     "CONSTRAINED_LAGRANGE_IN_SOLID": h_lagrange_in_solid,
     "CONSTRAINED_NODAL_RIGID_BODY_INERTIA": h_cnrb_inertia,
     "INITIAL_STRESS_SHELL": h_initial_stress_shell,

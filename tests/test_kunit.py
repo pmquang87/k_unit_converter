@@ -576,6 +576,71 @@ class NewFeatureTests(unittest.TestCase):
         with self.assertRaises(ConvertError):
             convert(p, SI, TON, p + ".o.k", self_check=False)
 
+    @staticmethod
+    def _cscm_deck(kw="*MAT_CSCM_CONCRETE_TITLE", units=4):
+        title = "concreteCSCM\n" if kw.endswith("_TITLE") else ""
+        return ("*KEYWORD\n" + kw + "\n" + title
+                + F(4, 2320.0, 2, 0.0, 1, 1.1, 10.0, 0) + "\n"
+                + F(0.0) + "\n"
+                + F("3.044E7", 0.0254, units) + "\n*END\n")
+
+    def test_mat_cscm_concrete_units_remap(self):
+        p = _write(self._cscm_deck())
+        out = p + ".o.k"
+        ctx = convert(p, SI, TON, out, self_check=False, verify_roundtrip=True)
+        lines = _lines(out)
+        c1 = lines[lines.index("concreteCSCM") + 1]
+        self.assertAlmostEqual(float(c1[10:20]), 2.32e-9)   # RO
+        self.assertEqual(int(c1[20:30]), 2)                 # NPLOT flag
+        self.assertEqual(int(c1[40:50]), 1)                 # IRATE flag
+        self.assertAlmostEqual(float(c1[50:60]), 1.1)       # ERODE strain
+        self.assertAlmostEqual(float(c1[60:70]), 10.0)      # RECOV ratio
+        c2 = lines[lines.index("concreteCSCM") + 2]
+        self.assertAlmostEqual(float(c2[0:10]), 0.0)        # PRED damage
+        c3 = lines[lines.index("concreteCSCM") + 3]
+        self.assertAlmostEqual(float(c3[0:10]), 30.44)      # FPC Pa -> MPa
+        self.assertAlmostEqual(float(c3[10:20]), 25.4)      # DAGG m -> mm
+        self.assertEqual(int(c3[20:30]), 2)                 # UNITS 4 -> 2
+        self.assertTrue(ctx.roundtrip.startswith("OK"), ctx.roundtrip)
+        self.assertEqual(ctx.warnings, [])
+
+    def test_mat_159_concrete_alias(self):
+        p = _write(self._cscm_deck(kw="*MAT_159_CONCRETE"))
+        out = p + ".o.k"
+        convert(p, SI, TON, out, self_check=False)
+        lines = _lines(out)
+        c3 = lines[lines.index("*MAT_159_CONCRETE") + 3]
+        self.assertAlmostEqual(float(c3[0:10]), 30.44)
+        self.assertEqual(int(c3[20:30]), 2)
+
+    def test_mat_cscm_concrete_no_target_units_aborts(self):
+        p = _write(self._cscm_deck())
+        with self.assertRaisesRegex(ConvertError, "no value for g-cm-us"):
+            convert(p, SI, parse_system("g-cm-us"), p + ".o.k",
+                    self_check=False)
+
+    def test_mat_cscm_concrete_units_mismatch_warns(self):
+        p = _write(self._cscm_deck(units=2))   # flag says ton-mm-s, deck is SI
+        out = p + ".o.k"
+        ctx = convert(p, SI, TON, out, self_check=False)
+        self.assertTrue(any("UNITS=2 declares ton-mm-s" in w
+                            for w in ctx.warnings), ctx.warnings)
+
+    def test_mat_cscm_user_defined_refused(self):
+        deck = ("*KEYWORD\n*MAT_CSCM\n"
+                + F(4, 2320.0, 2, 0.0, 1, 1.1, 10.0, 0) + "\n"
+                + F(0.0) + "\n"
+                + F("1.15E10", "1.28E10", "1.44E7", 0.31, "1.05E7",
+                    "1.93E-2", 1.0, 0.0) + "\n"
+                + F(0.74, "1.1E-3", 0.17, 0.07, 0.66, "1.6E-3", 0.16, 0.07) + "\n"
+                + F(5.0, "9.0E7", 0.05, "2.5E-10", "3.5E-19") + "\n"
+                + F(100.0, 6100.0, 0.1, 61.0, 61.0, 5.0, 1.0, 0.0) + "\n"
+                + F("1.0E-4", 0.78, "6.2E-5", 0.48, 21.0, 21.0, 1.0, 1.0)
+                + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "user-defined MAT_159"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
+
     def test_gui_imports(self):
         import kunit.gui  # noqa: F401  (no Tk instantiation)
 

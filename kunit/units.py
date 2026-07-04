@@ -221,6 +221,22 @@ BLAST_BUILTIN_UNITS: Dict[Tuple[str, str, str], int] = {
 BLAST_UNIT_SYSTEMS = {v: UnitSystem(*k) for k, v in BLAST_BUILTIN_UNITS.items()}
 
 
+# ── *MAT_CSCM_CONCRETE (MAT_159) UNITS flag support ──────────────────────────
+# UNITS values from the R16 manual Vol II p.2-1084 (*MAT_159 Card 3); the flag
+# declares the unit system that FPC (pressure) and DAGG (length) are given in:
+#   EQ.0: GPa, mm, msec, kg/mm3, kN      EQ.1: MPa, mm, msec, g/mm3, N
+#   EQ.2: MPa, mm, sec, Mg/mm3, N        EQ.3: Psi, inch, sec, lbf-s2/in4, lbf
+#   EQ.4: Pa, m, sec, kg/m3, N
+CSCM_UNITS: Dict[Tuple[str, str, str], int] = {
+    ("kg", "mm", "ms"): 0,
+    ("g", "mm", "ms"): 1,
+    ("ton", "mm", "s"): 2,
+    ("slinch", "in", "s"): 3,
+    ("kg", "m", "s"): 4,
+}
+CSCM_UNIT_SYSTEMS = {v: UnitSystem(*k) for k, v in CSCM_UNITS.items()}
+
+
 def blast_unit5_factors(sys: UnitSystem) -> Tuple[float, float, float, float]:
     """CFM/CFL/CFT/CFP for UNIT=5: model unit -> ConWep's lbm/ft/ms/psi.
 
