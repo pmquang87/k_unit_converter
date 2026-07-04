@@ -117,6 +117,33 @@ class DetectTests(unittest.TestCase):
         v = detect(out)
         self.assertEqual(v.system, TON)
 
+    # weak-evidence deck: density off every anchor (+2), modulus near one
+    # (+5) - total 7, so a wrongly credited header bonus (+8) flips the
+    # verdict.  Guards the '$ kunit: converted from X to Y' stamp parsing.
+    DECK_WEAK_SI = """*KEYWORD
+*MAT_ELASTIC
+         1    2580.07.20000E10      0.33
+*NODE
+       1             1.7        1.654231       0.2799996       0       0
+*END
+"""
+
+    def test_kunit_stamp_declares_destination(self):
+        p = _write(self.DECK_WEAK_SI)
+        out = p + ".ton.k"
+        convert(p, SI, TON, out, self_check=False)
+        v = detect(out)
+        self.assertEqual(v.system, TON)
+        self.assertTrue(any("kunit header declares ton-mm-s" in e
+                            for e in v.evidence), v.evidence)
+
+    def test_self_check_ok_with_weak_evidence(self):
+        p = _write(self.DECK_WEAK_SI)
+        out = p + ".ton.k"
+        ctx = convert(p, SI, TON, out, self_check=True)
+        self.assertTrue(ctx.self_check.startswith("OK"), ctx.self_check)
+        self.assertEqual(ctx.warnings, [])
+
 
 class ConvertTests(unittest.TestCase):
     def _conv(self, text=DECK_SI, **kw):

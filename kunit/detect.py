@@ -27,8 +27,11 @@ _MODULUS_ANCHORS = [2.1e11, 2.0e11, 1.93e11, 1.1e11, 7.0e10, 6.9e10,
                     3.0e9, 1.0e9]                            # Pa
 _G0 = 9.80665
 
-_HEADER_RE = re.compile(r"unit\s*system|units?\s*[:=]", re.IGNORECASE)
+_HEADER_RE = re.compile(r"\bunit\s*system|\bunits?\s*[:=]", re.IGNORECASE)
 _TOKEN_RE = re.compile(r"[a-zµ]+", re.IGNORECASE)
+# stamp written by convert(); the deck is now in the *destination* system
+_KUNIT_HDR_RE = re.compile(r"\bkunit:\s*converted\s+from\s+\S+\s+to\s+(\S+)",
+                           re.IGNORECASE)
 
 
 @dataclass
@@ -96,7 +99,18 @@ def detect(path: str, follow_includes: bool = True) -> Verdict:
     # header comment declaration (main file only)
     header_sys: Optional[UnitSystem] = None
     for ln in files[0].lines[:80]:
-        if ln.lstrip().startswith("$") and _HEADER_RE.search(ln):
+        if not ln.lstrip().startswith("$"):
+            continue
+        km = _KUNIT_HDR_RE.search(ln)
+        if km:
+            try:
+                header_sys = parse_system(km.group(1))
+                evidence.append(f"kunit header declares {header_sys.key}: "
+                                f"{ln.strip()!r}")
+            except ValueError:
+                pass
+            break
+        if _HEADER_RE.search(ln):
             toks = [t.lower() for t in _TOKEN_RE.findall(ln)]
             m = next((t for t in toks if t in ("kg", "g", "ton", "tonne", "mg",
                                                "lbm", "lb", "slug", "slinch")), None)
