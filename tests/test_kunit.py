@@ -197,6 +197,18 @@ class ConvertTests(unittest.TestCase):
         self.assertAlmostEqual(float(c2[0:10]), 2204.62262, places=3)
         self.assertAlmostEqual(float(c2[20:30]), 1000.0)
 
+    def test_blast_unit5_card2_rounds_to_field_width(self):
+        # CFL for ton-mm-s is 1 mm in ft = 1/304.8 = 0.0032808399... (R16
+        # Vol I p.33-18: CFL = feet per length unit).  The 10-char field must
+        # hold the correctly ROUNDED shortest form, 0.00328084 - not
+        # 0.00328083, the truncation of the 9-significant-digit form.
+        lines, _ = self._conv(blast_unit=5)
+        bi = lines.index("*LOAD_BLAST_ENHANCED")
+        c2 = lines[bi + 2]
+        self.assertEqual(c2[10:20], "0.00328084")
+        self.assertEqual(c2[0:10], "2204.62262")
+        self.assertEqual(c2[30:40], "145.037738")
+
     def test_round_trip(self):
         p = _write(DECK_SI)
         mid = p + ".ton.k"

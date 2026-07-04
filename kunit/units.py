@@ -248,8 +248,9 @@ CSCM_UNIT_SYSTEMS = {v: UnitSystem(*k) for k, v in CSCM_UNITS.items()}
 def blast_unit5_factors(sys: UnitSystem) -> Tuple[float, float, float, float]:
     """CFM/CFL/CFT/CFP for UNIT=5: model unit -> ConWep's lbm/ft/ms/psi.
 
-    Per the R16 manual: CFM = pounds per mass unit, CFL = feet per length
-    unit, CFT = MILLIseconds per time unit, CFP = psi per pressure unit.
+    Per the R16 manual (Vol I p.33-18): CFM = pounds per mass unit, CFL =
+    feet per length unit, CFT = MILLIseconds per time unit, CFP = psi per
+    pressure unit.
     """
     psi_pa = _LB * _G0 / _IN ** 2
     return (float(sys.mass_kg / _LB),

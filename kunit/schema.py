@@ -13,9 +13,10 @@ All field->dimension maps are verified against the LS-DYNA R16 manuals.
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dfield
+from decimal import Decimal
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from .parser import STD8, Block, KFile, parse_number
+from .parser import STD8, Block, KFile, format_fixed, parse_number
 from .units import (ACCEL, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC, DENSITY,
                     Dim, DIM_NAMES, DIMLESS, FORCE, FREQ, INERTIA, L4, LENGTH,
                     MASS, MASS_AREA, MASS_LEN, MOMENT, PRESSURE, PWR_VOL, RATE,
@@ -921,7 +922,11 @@ def h_mesh_bl(block: Block, ctx, edit: bool) -> None:
 
 
 def h_blast(block: Block, ctx, edit: bool) -> None:
-    """*LOAD_BLAST_ENHANCED and legacy *LOAD_BLAST."""
+    """*LOAD_BLAST_ENHANCED (R16 Vol I p.33-16..33-21) and legacy *LOAD_BLAST.
+
+    Card 2 CFM/CFL/CFT/CFP (p.33-18) convert model units to ConWep's
+    lbm/ft/ms/psi when UNIT=5.
+    """
     kf = ctx.kf
     legacy = block.name == "LOAD_BLAST"
     data = list(block.data)
@@ -972,8 +977,9 @@ def h_blast(block: Block, ctx, edit: bool) -> None:
             if use5:
                 cfs = blast_unit5_factors(ctx.dst)
                 for fi, v in enumerate(cfs):
-                    s = f"{v:.9G}"[:w]
-                    kf.set_field(li2, STD8, block.long, fi, s.rjust(w))
+                    s, rel = format_fixed(Decimal(str(v)), w)
+                    kf.max_fmt_err = max(kf.max_fmt_err, rel)
+                    kf.set_field(li2, STD8, block.long, fi, s)
             else:
                 for fi in range(4):
                     kf.set_field(li2, STD8, block.long, fi, "0.0".rjust(w))
