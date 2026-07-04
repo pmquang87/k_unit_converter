@@ -381,6 +381,65 @@ class NewFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(float(lines[mi + 3][10:20]), -1000.0) # PC
         self.assertTrue(any("temperature" in n for n in ctx.notes))
 
+    def test_mat_power_law_plasticity(self):
+        deck = ("*KEYWORD\n*MAT_POWER_LAW_PLASTICITY_TITLE\nDoor\n"
+                + F(1, 7850.0, "2.09E11", 0.33, "5.5E8", 0.25, 40.0, 5.0)
+                + "\n" + F("2.8E8", 0.0, 0.487) + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, SI, TON, out, self_check=False)
+        lines = _lines(out)
+        mi = lines.index("*MAT_POWER_LAW_PLASTICITY_TITLE")
+        c1, c2 = lines[mi + 2], lines[mi + 3]
+        self.assertAlmostEqual(float(c1[10:20]), 7.85e-9)  # RO
+        self.assertAlmostEqual(float(c1[20:30]), 2.09e5)   # E
+        self.assertAlmostEqual(float(c1[30:40]), 0.33)     # PR unchanged
+        self.assertAlmostEqual(float(c1[40:50]), 550.0)    # K
+        self.assertAlmostEqual(float(c1[50:60]), 0.25)     # N unchanged
+        self.assertAlmostEqual(float(c1[60:70]), 40.0)     # SRC (s -> s)
+        self.assertAlmostEqual(float(c1[70:80]), 5.0)      # SRP unchanged
+        self.assertAlmostEqual(float(c2[0:10]), 280.0)     # SIGY
+        self.assertAlmostEqual(float(c2[20:30]), 0.487)    # EPSF unchanged
+
+    def test_mat_018_alias_rate_scaling(self):
+        # kg-mm-ms -> ton-mm-s: pressures x1e3 (GPa -> MPa), and the
+        # Cowper-Symonds C is a strain rate: 1/ms -> 1/s is x1e3 too
+        deck = ("*KEYWORD\n*MAT_018\n"
+                + F(1, "7.85E-6", 209.0, 0.33, 0.55, 0.25, 0.04, 5.0) + "\n"
+                + F(0.28, 0.0, 0.487) + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, KGMM, TON, out, self_check=False)
+        lines = _lines(out)
+        mi = lines.index("*MAT_018")
+        self.assertAlmostEqual(float(lines[mi + 1][20:30]), 209000.0)  # E
+        self.assertAlmostEqual(float(lines[mi + 1][40:50]), 550.0)     # K
+        self.assertAlmostEqual(float(lines[mi + 1][60:70]), 40.0)      # SRC
+        self.assertAlmostEqual(float(lines[mi + 2][0:10]), 280.0)      # SIGY
+
+    def test_mat_power_law_sigy_strain_form(self):
+        # 0 < SIGY < 0.02 is the elastic strain to yield - never scaled
+        deck = ("*KEYWORD\n*MAT_POWER_LAW_PLASTICITY\n"
+                + F(1, 7850.0, "2.09E11", 0.33, "5.5E8", 0.25, 0.0, 0.0)
+                + "\n" + F(0.015, 0.0, 0.0) + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        ctx = convert(p, SI, TON, out, self_check=False)
+        lines = _lines(out)
+        mi = lines.index("*MAT_POWER_LAW_PLASTICITY")
+        self.assertAlmostEqual(float(lines[mi + 2][0:10]), 0.015)
+        self.assertTrue(any("elastic strain" in n for n in ctx.notes))
+
+    def test_mat_power_law_sigy_threshold_refused(self):
+        # a 15 kPa yield stress scales to 0.015 MPa < 0.02, which LS-DYNA
+        # would re-interpret as a strain - must refuse
+        deck = ("*KEYWORD\n*MAT_POWER_LAW_PLASTICITY\n"
+                + F(1, 7850.0, "2.09E11", 0.33, "5.5E8", 0.25, 0.0, 0.0)
+                + "\n" + F("1.5E4", 0.0, 0.0) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "SIGY"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
+
     def test_discrete_spring_dro(self):
         deck = ("*KEYWORD\n"
                 "*SECTION_DISCRETE\n" + F(100, 1, 0.0, 0.0, 0.0, 0.0) + "\n"

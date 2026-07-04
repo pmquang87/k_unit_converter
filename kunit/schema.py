@@ -135,6 +135,19 @@ SPECS: Dict[str, Spec] = {
         C({0: SPEC_HEAT, 1: PRESSURE}),
         C()],                                    # card 4 (see EDIT_EXTRA)
         probe={"ro": (0, 1), "e": (0, 3)}),
+    # R16 Vol II p.2-223..2-225 (*MAT_POWER_LAW_PLASTICITY / MAT_018):
+    # Card1 MID RO E PR K N SRC SRP - RO mass density, E Young's modulus,
+    # K strength coefficient (sigma_y = k*eps^n with dimensionless strain,
+    # so stress units), N hardening exponent and SRP the Cowper-Symonds
+    # exponent P (both dimensionless); SRC is the Cowper-Symonds strain-rate
+    # parameter C (a strain rate, 1/time).  Card2 SIGY VP EPSF - VP is a
+    # formulation flag and EPSF the plastic failure strain (dimensionless);
+    # SIGY is value-dependent (yield stress, or elastic strain to yield when
+    # 0 < SIGY < 0.02, p.2-224) and is handled by x_mat_018, not the table.
+    "MAT_POWER_LAW_PLASTICITY": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 4: PRESSURE, 6: RATE}),
+        C()],
+        probe={"ro": (0, 1), "e": (0, 2)}),
     # R16 Vol II p.2-245..2-250 (*MAT_COMPOSITE_DAMAGE / MAT_022):
     # Card1 MID RO EA EB EC PRBA PRCA PRCB; Card2 GAB GBC GCA KFAIL AOPT
     # MACF ATRACK; Card3 XP YP ZP A1 A2 A3; Card4 V1 V2 V3 D1 D2 D3 BETA;
@@ -278,6 +291,7 @@ _MAT_ALIASES = {
     "MAT_003": "MAT_PLASTIC_KINEMATIC",
     "MAT_008": "MAT_HIGH_EXPLOSIVE_BURN", "MAT_009": "MAT_NULL",
     "MAT_015": "MAT_JOHNSON_COOK",
+    "MAT_018": "MAT_POWER_LAW_PLASTICITY",
     "MAT_020": "MAT_RIGID", "MAT_022": "MAT_COMPOSITE_DAMAGE",
     "MAT_024": "MAT_PIECEWISE_LINEAR_PLASTICITY",
     "MAT_140": "MAT_VACUUM",
@@ -591,6 +605,32 @@ def x_mat_015(block: Block, ctx) -> None:
         ctx.warn(f"*{block.name}: Card 4 rate parameter C2/P/XNP={p2} left "
                  f"unscaled - its units depend on RATEOP={int(rateop)} "
                  "(1/time for Cowper-Symonds P) - verify and scale manually.")
+
+
+def x_mat_018(block: Block, ctx) -> None:
+    """Edit-time SIGY handling for *MAT_POWER_LAW_PLASTICITY (R16 Vol II
+    p.2-224): 0 < SIGY < 0.02 is read as the elastic strain to initial
+    yield (dimensionless - left unchanged), SIGY >= 0.02 as the initial
+    yield stress (scaled here, not by the Spec).  Refuse when scaling a
+    stress would drop it below 0.02 and flip LS-DYNA's interpretation."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 2:
+        return
+    sigy = kf.get_number(data[1], STD8, block.long, 0)
+    if not sigy or sigy < 0:
+        return
+    if sigy < Decimal("0.02"):
+        ctx.note(f"*{block.name}: SIGY={sigy} < 0.02 is the elastic strain "
+                 "to initial yield (R16 Vol II p.2-224) - left unchanged.")
+        return
+    f = ctx.fac(PRESSURE)
+    if Fraction(sigy) * f < Fraction(2, 100):
+        ctx.error(f"*{block.name}: SIGY={sigy} would scale below 0.02, "
+                  "which LS-DYNA re-interprets as a strain (R16 Vol II "
+                  "p.2-224) - convert this material manually.")
+        return
+    kf.scale_field(data[1], STD8, block.long, 0, f)
 
 
 def h_section_beam(block: Block, ctx, edit: bool) -> None:
@@ -1611,4 +1651,5 @@ EDIT_EXTRA: Dict[str, Callable] = {
     "MAT_ELASTIC": x_mat_001,
     "MAT_ELASTIC_FLUID": x_mat_001,
     "MAT_JOHNSON_COOK": x_mat_015,
+    "MAT_POWER_LAW_PLASTICITY": x_mat_018,
 }
