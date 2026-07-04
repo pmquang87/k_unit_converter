@@ -4,8 +4,10 @@ Evidence, strongest first:
   1. material densities (steel ~7850 kg/m^3, aluminium ~2700, water ~1000...)
   2. elastic moduli (steel ~2.1e11 Pa) - fixes the time unit via c=sqrt(E/rho)
   3. detonation velocities (HE burn D ~ 4000-9000 m/s)
-  4. gravity-shaped *LOAD_BODY curve ordinates (9.80665 m/s^2)
-  5. header comments ('Unit system : m, kg, sec, Pa')
+  4. *ICFD_MAT fluid density / dynamic viscosity (water ~1000 kg/m^3 /
+     1e-3 Pa*s, air ~1.225 / 1.81e-5)
+  5. gravity-shaped *LOAD_BODY curve ordinates (9.80665 m/s^2)
+  6. header comments ('Unit system : m, kg, sec, Pa')
 Each candidate system gets a score; the ranked table plus the winning system
 are returned. Ambiguity (top two closer than 20%) -> caller should demand an
 explicit --from. Includes are followed (tolerantly) so evidence in child
@@ -25,6 +27,9 @@ _DENSITY_ANCHORS = [7850.0, 7800.0, 7830.0, 8900.0, 2700.0, 4500.0,
                     1000.0, 2400.0, 1200.0, 7200.0, 1630.0]  # kg/m^3 (1630=TNT)
 _MODULUS_ANCHORS = [2.1e11, 2.0e11, 1.93e11, 1.1e11, 7.0e10, 6.9e10,
                     3.0e9, 1.0e9]                            # Pa
+# *ICFD_MAT probes: common working fluids (water / air at ~15-25 degC)
+_ICFD_DENSITY_ANCHORS = [1000.0, 1.225]                      # kg/m^3
+_ICFD_VIS_ANCHORS = [1.0e-3, 8.9e-4, 1.81e-5]                # Pa*s (dynamic)
 _G0 = 9.80665
 
 _HEADER_RE = re.compile(r"\bunit\s*system|\bunits?\s*[:=]", re.IGNORECASE)
@@ -61,10 +66,13 @@ def detect(path: str, follow_includes: bool = True) -> Verdict:
     ctx = scan(files, None, {"follow_includes": follow_includes})
     evidence: List[str] = []
 
-    # probe values declared by the schema (density / modulus / det velocity)
+    # probe values declared by the schema (density / modulus / det velocity /
+    # ICFD fluid density and dynamic viscosity)
     ros: List[float] = []
     es: List[float] = []
     dets: List[float] = []
+    icfd_ros: List[float] = []
+    icfd_viss: List[float] = []
     from .schema import resolve
     for kf in files:
         for block in kf.blocks:
@@ -79,7 +87,8 @@ def detect(path: str, follow_includes: bool = True) -> Verdict:
                 if ci < len(data):
                     v = kf.get_number(data[ci], STD8, block.long, fi)
                     if v:
-                        {"ro": ros, "e": es, "d": dets}[key].append(float(v))
+                        {"ro": ros, "e": es, "d": dets, "icfd_ro": icfd_ros,
+                         "icfd_vis": icfd_viss}[key].append(float(v))
 
     # gravity ordinates from *LOAD_BODY curves
     gravities: List[float] = []
@@ -150,6 +159,18 @@ def detect(path: str, follow_includes: bool = True) -> Verdict:
             d_si = d * fl / ft
             if _log_band(d_si, 3500, 10000):
                 s += 3
+        for ro in icfd_ros:
+            d_si = ro * fm / fl ** 3
+            if _near(d_si, _ICFD_DENSITY_ANCHORS, 0.05):
+                s += 5
+            elif _log_band(d_si, 0.5, 2500):
+                s += 1
+        for vis in icfd_viss:
+            v_si = vis * fm / (fl * ft)
+            if _near(v_si, _ICFD_VIS_ANCHORS, 0.08):
+                s += 5
+            elif _log_band(v_si, 1e-6, 1e2):
+                s += 1
         for g in gravities:
             g_si = g * fl / ft ** 2
             if abs(g_si / _G0 - 1.0) < 0.02:
@@ -167,6 +188,10 @@ def detect(path: str, follow_includes: bool = True) -> Verdict:
         evidence.append(f"elastic modulus {e:g}")
     for d in dets[:2]:
         evidence.append(f"detonation velocity {d:g}")
+    for ro in icfd_ros[:4]:
+        evidence.append(f"ICFD fluid density {ro:g}")
+    for vis in icfd_viss[:4]:
+        evidence.append(f"ICFD dynamic viscosity {vis:g}")
     for g in gravities[:2]:
         evidence.append(f"gravity-curve ordinate {g:g}")
     if len(files) > 1:

@@ -645,5 +645,146 @@ class NewFeatureTests(unittest.TestCase):
         import kunit.gui  # noqa: F401  (no Tk instantiation)
 
 
+class IcfdTests(unittest.TestCase):
+    """ICFD / *MESH keywords (R16 Vol III), water in kg-m-s."""
+
+    DECK = ("*KEYWORD\n"
+            "*ICFD_CONTROL_TIME\n"
+            + F(0.5, 0.0, 1.0, 0, -50.0, 0.0, 0.001, "1.00000E28") + "\n"
+            + F(0.02) + "\n"
+            + F(0, 0, 0) + "\n"
+            + F(1, 0.001, 1.0, 0, 0.0, 0.0, 0.002) + "\n"
+            "*ICFD_CONTROL_OUTPUT\n"
+            + F(4, 0, 0.05, 1, 0, 0) + "\n"
+            "*ICFD_DATABASE_DRAG\n"
+            + F(4, 0, 0.01, 0, 10, 0, 0) + "\n"
+            "*ICFD_MAT_TITLE\n"
+            "water\n"
+            + F(1, 1, 1000.0, 0.001, 0.0728, 3) + "\n"
+            + F(4182.0, 0.6, 0.0, 0.85, 0, 0) + "\n"
+            "*ICFD_PART\n"
+            + F(1, 1, 1) + "\n"
+            "*ICFD_PART_VOL\n"
+            + F(5, 1, 1) + "\n"
+            + F(1, 2, 3, 4, 0, 0, 0, 0) + "\n"
+            "*ICFD_SECTION\n"
+            + F(1) + "\n"
+            "*ICFD_BOUNDARY_NONSLIP\n"
+            + F(4) + "\n"
+            "*ICFD_BOUNDARY_FREESLIP\n"
+            + F(3) + "\n"
+            "*ICFD_BOUNDARY_PRESCRIBED_VEL\n"
+            + F(1, 1, 1, 1, 1.0, 0, "1.00000E28", 0.0) + "\n"
+            "*ICFD_BOUNDARY_PRESCRIBED_VEL\n"
+            + F(1, 2, 1, 2, 1.0, 0, "1.00000E28", 0.0) + "\n"
+            "*ICFD_BOUNDARY_PRESCRIBED_PRE\n"
+            + F(2, 2, 1.0, "1.00000E28", 0.0) + "\n"
+            "*MESH_BL\n"
+            + F(4, 3, 0.5, 0.05, 2) + "\n"       # BLST=2: BLTH is a length
+            + F(5, 3, 1.2, 0.001, 3) + "\n"      # BLST=3: BLFE is a length
+            + F(6, -7, 0.5, 0.05, 2) + "\n"      # negative NELTH: curve ref
+            "*MESH_SURFACE_NODE\n"
+            "     330        1.281916       0.7851647             0.0\n"
+            "*MESH_SURFACE_ELEMENT\n"
+            "     318       1     537     538       0       0\n"
+            "*MESH_VOLUME\n"
+            + F(1) + "\n"
+            + F(1, 2, 3, 4, 0, 0, 0, 0) + "\n"
+            "*DEFINE_CURVE_TITLE\n"
+            "Vel_inlet\n"
+            + F(1, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+            + F("0.0", "50.0", w=20) + "\n"
+            + F("1.0", "50.0", w=20) + "\n"
+            "*DEFINE_CURVE_TITLE\n"
+            "Zero\n"
+            + F(2, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+            + F("0.0", "0.0", w=20) + "\n"
+            + F("2.0", "0.0", w=20) + "\n"
+            "*DEFINE_CURVE_TITLE\n"
+            "STscale\n"
+            + F(3, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+            + F("0.0", "1.0", w=20) + "\n"
+            + F("1.0", "1.0", w=20) + "\n"
+            "*END\n")
+
+    def test_detect_icfd_si(self):
+        v = detect(_write(self.DECK))
+        self.assertEqual(v.system, SI)
+        self.assertFalse(v.ambiguous, v.table())
+        self.assertTrue(any("ICFD fluid density 1000" in e
+                            for e in v.evidence), v.evidence)
+
+    def test_icfd_to_ton(self):
+        p = _write(self.DECK)
+        out = p + ".o.k"
+        ctx = convert(p, SI, TON, out, verify_roundtrip=True)
+        lines = _lines(out)
+        # ICFD_MAT: RO, VIS, ST scaled; STSFLCID id untouched; HC/TC card
+        mi = lines.index("water") + 1
+        self.assertAlmostEqual(float(lines[mi][20:30]), 1e-9)      # RO
+        self.assertAlmostEqual(float(lines[mi][30:40]), 1e-9)      # VIS
+        self.assertAlmostEqual(float(lines[mi][40:50]), 7.28e-5)   # ST
+        self.assertEqual(int(lines[mi][50:60]), 3)                 # STSFLCID
+        self.assertAlmostEqual(float(lines[mi + 1][0:10]), 4.182e9)  # HC
+        self.assertAlmostEqual(float(lines[mi + 1][10:20]), 0.6)     # TC
+        # velocity curve ordinates x1000; zero/scale-factor curves unchanged
+        ci = lines.index("Vel_inlet")
+        self.assertAlmostEqual(float(lines[ci + 2][20:40]), 50000.0)
+        zi = lines.index("Zero")
+        self.assertAlmostEqual(float(lines[zi + 2][20:40]), 0.0)
+        si = lines.index("STscale")
+        self.assertAlmostEqual(float(lines[si + 2][20:40]), 1.0)
+        # MESH_SURFACE_NODE coordinates x1000 (i8 + 3e16 layout)
+        ni = lines.index("*MESH_SURFACE_NODE") + 1
+        self.assertEqual(lines[ni][0:8], "     330")
+        self.assertAlmostEqual(float(lines[ni][8:24]), 1281.916)
+        self.assertAlmostEqual(float(lines[ni][24:40]), 785.1647)
+        # MESH_BL: BLST=2 scales BLTH, BLST=3 scales BLFE, negative untouched
+        bi = lines.index("*MESH_BL")
+        self.assertAlmostEqual(float(lines[bi + 1][20:30]), 500.0)  # BLTH
+        self.assertAlmostEqual(float(lines[bi + 1][30:40]), 0.05)   # BLFE
+        self.assertAlmostEqual(float(lines[bi + 2][20:30]), 1.2)    # BLTH
+        self.assertAlmostEqual(float(lines[bi + 2][30:40]), 1.0)    # BLFE
+        self.assertEqual(int(lines[bi + 3][10:20]), -7)             # NELTH
+        # MESH_SURFACE_ELEMENT connectivity untouched
+        ei = lines.index("*MESH_SURFACE_ELEMENT") + 1
+        self.assertEqual(lines[ei], "     318       1     537     538"
+                                    "       0       0")
+        # the all-zero shared curve downgrades the dim conflict to a warning
+        self.assertTrue(any("lcid=2" in w and "immaterial" in w
+                            for w in ctx.warnings), ctx.warnings)
+        self.assertTrue(ctx.self_check.startswith("OK"), ctx.self_check)
+        self.assertTrue(ctx.roundtrip.startswith("OK"), ctx.roundtrip)
+
+    def test_icfd_control_time_to_ms(self):
+        p = _write(self.DECK)
+        out = p + ".o.k"
+        convert(p, SI, parse_system("kg-mm-ms"), out, self_check=False)
+        lines = _lines(out)
+        ti = lines.index("*ICFD_CONTROL_TIME")
+        c1 = lines[ti + 1]
+        self.assertAlmostEqual(float(c1[0:10]), 500.0)     # TTM
+        self.assertAlmostEqual(float(c1[40:50]), -50.0)    # DTMIN curve ref
+        self.assertAlmostEqual(float(c1[60:70]), 1.0)      # DTINIT
+        self.assertAlmostEqual(float(c1[70:80]), 1e31)     # TDEATH
+        self.assertAlmostEqual(float(lines[ti + 2][0:10]), 20.0)   # DTT
+        c4 = lines[ti + 4]
+        self.assertAlmostEqual(float(c4[10:20]), 1.0)      # DTDR
+        self.assertAlmostEqual(float(c4[60:70]), 2.0)      # DTINITDR
+        oi = lines.index("*ICFD_CONTROL_OUTPUT")
+        self.assertAlmostEqual(float(lines[oi + 1][20:30]), 50.0)  # DTOUT
+        di = lines.index("*ICFD_DATABASE_DRAG")
+        self.assertAlmostEqual(float(lines[di + 1][20:30]), 10.0)  # DTOUT
+        vi = lines.index("*ICFD_BOUNDARY_PRESCRIBED_VEL")
+        self.assertAlmostEqual(float(lines[vi + 1][60:70]), 1e31)  # DEATH
+
+    def test_icfd_vel_vad4_refused(self):
+        deck = ("*KEYWORD\n*ICFD_BOUNDARY_PRESCRIBED_VEL\n"
+                + F(1, 1, 4, 9, 1.0, 0, 0.0, 0.0) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "VAD=4"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
+
+
 if __name__ == "__main__":
     unittest.main()

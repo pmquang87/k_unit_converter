@@ -17,12 +17,12 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .parser import STD8, Block, KFile, parse_number
 from .units import (ACCEL, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC, DENSITY,
-                    Dim, DIMLESS, FORCE, FREQ, INERTIA, L4, LENGTH, MASS,
-                    MASS_AREA, MASS_LEN, MOMENT, PRESSURE, RATE, ROT_DAMP,
-                    SPEC_HEAT, STIFF, STIFF_LEN, STRESS_M3, TEMP, TIME,
-                    VELOCITY, VISCOSITY, BLAST_BUILTIN_UNITS,
-                    BLAST_UNIT_SYSTEMS, CSCM_UNITS, CSCM_UNIT_SYSTEMS,
-                    blast_unit5_factors)
+                    Dim, DIM_NAMES, DIMLESS, FORCE, FREQ, INERTIA, L4, LENGTH,
+                    MASS, MASS_AREA, MASS_LEN, MOMENT, PRESSURE, RATE,
+                    ROT_DAMP, SPEC_HEAT, STIFF, STIFF_LEN, STRESS_M3, TEMP,
+                    THERM_COND, TIME, VELOCITY, VISCOSITY,
+                    BLAST_BUILTIN_UNITS, BLAST_UNIT_SYSTEMS, CSCM_UNITS,
+                    CSCM_UNIT_SYSTEMS, blast_unit5_factors)
 
 STRAIN = DIMLESS
 
@@ -195,6 +195,36 @@ SPECS: Dict[str, Spec] = {
     # R16 Vol I p.17-146: LCID SIDR DIST TSTART TEND TRISE VMAX
     "DEFINE_CURVE_SMOOTH": Spec(repeat=C(
         {2: LENGTH, 3: TIME, 4: TIME, 5: TIME, 6: VELOCITY})),
+
+    # ── ICFD incompressible-flow solver (R16 Vol III) ───────────────────────
+    # R16 Vol III p.7-147..7-149 (*ICFD_MAT): Card1 MID FLG RO VIS ST
+    # STSFLCID CA - RO is the flow density, VIS the dynamic viscosity, ST the
+    # surface tension coefficient (force/length, STIFF signature), STSFLCID a
+    # dimensionless time-scale-factor curve and CA a contact angle (degrees).
+    # Card2 (thermal) HC TC BETA PRT HCSFLCID TCSFLCID - HC heat capacity, TC
+    # thermal conductivity; BETA (1/temperature) and PRT stay unchanged.
+    # Card3 NNMOID PMMOID SPTRID VID - model ids only.
+    "ICFD_MAT": Spec(cards=[
+        C({2: DENSITY, 3: VISCOSITY, 4: STIFF}),
+        C({0: SPEC_HEAT, 1: THERM_COND}),
+        C()],
+        curves=[(0, 5, TIME, DIMLESS), (1, 4, TIME, DIMLESS),
+                (1, 5, TIME, DIMLESS)],
+        probe={"icfd_ro": (0, 2), "icfd_vis": (0, 3)}),
+    # R16 Vol III p.7-70..7-72 (*ICFD_CONTROL_OUTPUT): Card1 MSGL OUTL DTOUT
+    # LSPPOUT - ITOUT (DTOUT = output time interval); optional Card2 PITOUT.
+    "ICFD_CONTROL_OUTPUT": Spec(cards=[C({2: TIME}), C()]),
+    # R16 Vol III p.7-99 (*ICFD_DATABASE_DRAG[_VOL]): one card per surface,
+    # PID CPID DTOUT PEROUT DIVI ELOUT SSOUT (DTOUT = output time interval).
+    "ICFD_DATABASE_DRAG": Spec(repeat=C({2: TIME})),
+    "ICFD_DATABASE_DRAG_VOL": Spec(repeat=C({2: TIME})),
+
+    # ── *MESH volume mesher (R16 Vol III) ───────────────────────────────────
+    # R16 Vol III p.8-19 (*MESH_SURFACE_NODE): NID X Y Z, coordinates are
+    # lengths; i8 + 3e16 layout like *NODE (LS-PrePost writes 16-char floats;
+    # p.8-18 documents the companion element card as 6i8, not 6i10).
+    "MESH_SURFACE_NODE": Spec(repeat=C(
+        {1: LENGTH, 2: LENGTH, 3: LENGTH}, (8, 16, 16, 16))),
 }
 
 # numeric aliases
@@ -234,6 +264,12 @@ WHITELIST = {
     # strain tensors are dimensionless
     "INITIAL_STRAIN_SHELL", "INITIAL_STRAIN_SHELL_SET",
     "INITIAL_STRAIN_SOLID", "INITIAL_STRAIN_SOLID_SET",
+    # ICFD / MESH id-only keywords (R16 Vol III):
+    # p.7-9/7-19 boundary pids; p.7-165..7-168 part/section ids;
+    # p.8-17/8-21 element connectivity and volume-from-surface-pid lists
+    "ICFD_BOUNDARY_FREESLIP", "ICFD_BOUNDARY_NONSLIP",
+    "ICFD_PART", "ICFD_PART_VOL", "ICFD_SECTION",
+    "MESH_SURFACE_ELEMENT", "MESH_VOLUME",
 }
 WHITELIST_PREFIXES = (
     "SET_", "BOUNDARY_SPC", "DATABASE_HISTORY", "CONTROL_MPP_",
@@ -287,11 +323,29 @@ def h_define_curve(block: Block, ctx, edit: bool) -> None:
         ctx.count(block.name + " (unreferenced, unchanged)")
         return
     if len(dims) > 1:
-        ctx.error(f"*{block.name} lcid={lcid}: conflicting dimension demands "
-                  f"from referencers: {sorted(dims.items())} - resolve with "
-                  f"--curve {lcid}=<xdim>:<ydim>")
-        return
-    (xdim, ydim), _src = next(iter(dims.items()))
+        # Referencers that agree on the abscissa but disagree on the ordinate
+        # are still safe when every ordinate (and OFFO) is zero - a common
+        # LS-PrePost pattern (one all-zero curve shared by e.g. a
+        # zero-pressure outlet and a zero-velocity constraint).
+        xdims = {xd for (xd, _yd) in dims}
+        ords = [kf.get_number(li, CURVE_W, block.long, 1) for li in data[1:]]
+        offo = kf.get_number(data[0], STD8, block.long, 5)
+        if len(xdims) == 1 and not offo and not any(ords):
+            wants = ", ".join(
+                f"*{src} wants {DIM_NAMES.get(yd, yd)}"
+                for (_xd, yd), src in sorted(dims.items(), key=str))
+            ctx.warn(f"*{block.name} lcid={lcid}: referencers disagree on the "
+                     f"ordinate dimension ({wants}) but every ordinate is "
+                     "zero, so the conflict is immaterial - abscissas scaled, "
+                     "ordinates left at zero.")
+            xdim, ydim = next(iter(xdims)), DIMLESS
+        else:
+            ctx.error(f"*{block.name} lcid={lcid}: conflicting dimension "
+                      f"demands from referencers: {sorted(dims.items())} - "
+                      f"resolve with --curve {lcid}=<xdim>:<ydim>")
+            return
+    else:
+        (xdim, ydim), _src = next(iter(dims.items()))
     fx, fy = ctx.fac(xdim), ctx.fac(ydim)
     kf.scale_field(data[0], STD8, block.long, 4, fx)   # OFFA
     kf.scale_field(data[0], STD8, block.long, 5, fy)   # OFFO
@@ -676,6 +730,118 @@ def h_database_dt(block: Block, ctx, edit: bool) -> None:
         ctx.count("DATABASE_* (dt)")
 
 
+def h_icfd_prescribed_vel(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol III p.7-32..7-33 (*ICFD_BOUNDARY_PRESCRIBED_VEL), repeating
+    cards PID DOF VAD LCID SF VID DEATH BIRTH.  The LCID curve carries the
+    motion value versus time; VAD picks its ordinate dimension (1 = linear
+    velocity, 2 = angular velocity, 3 = parabolic velocity profile).  VAD = 4
+    (synthetic turbulent field, *ICFD_CONTROL_TURB_SYNTHESIS) does not
+    document the curve's meaning, so it is refused.  DEATH/BIRTH are times."""
+    kf = ctx.kf
+    for li in block.data:
+        vad = _numint(kf, li, STD8, block.long, 2) or 1
+        lcid = _numint(kf, li, STD8, block.long, 3)
+        ydim = {1: VELOCITY, 2: ANG_VEL, 3: VELOCITY}.get(vad)
+        if ydim is None:
+            if lcid:
+                ctx.error(f"*{block.name}: VAD={vad} is not modelled (the "
+                          "manual does not document the curve's dimension "
+                          "for synthetic turbulence) - convert manually.")
+            continue
+        if not edit:
+            if lcid:
+                ctx.register_curve(lcid, TIME, ydim, block.name)
+        else:
+            kf.scale_field(li, STD8, block.long, 6, ctx.fac(TIME))  # DEATH
+            kf.scale_field(li, STD8, block.long, 7, ctx.fac(TIME))  # BIRTH
+    if edit:
+        ctx.count(block.name)
+
+
+def h_icfd_prescribed_pre(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol III p.7-25 (*ICFD_BOUNDARY_PRESCRIBED_PRE), repeating cards
+    PID LCID SF DEATH BIRTH ISO.  The LCID curve is pressure versus time;
+    DEATH/BIRTH are times; SF and ISO stay."""
+    kf = ctx.kf
+    for li in block.data:
+        lcid = _numint(kf, li, STD8, block.long, 1)
+        if not edit:
+            if lcid:
+                ctx.register_curve(lcid, TIME, PRESSURE, block.name)
+        else:
+            kf.scale_field(li, STD8, block.long, 3, ctx.fac(TIME))  # DEATH
+            kf.scale_field(li, STD8, block.long, 4, ctx.fac(TIME))  # BIRTH
+    if edit:
+        ctx.count(block.name)
+
+
+def h_icfd_control_time(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol III p.7-82..7-84 (*ICFD_CONTROL_TIME): Card1 TTM DT CFL LCIDSF
+    DTMIN DTMAX DTINIT TDEATH; optional Card2 DTT; optional Card3 DTBL DTST
+    DTVISC (flags); optional Card4 IDR DTDR CFLDR LCIDSFDR DTMINDR DTMAXDR
+    DTINITDR.  TTM/DT*/TDEATH are times; CFL[DR] is dimensionless; LCIDSF[DR]
+    is a time-step scale-factor curve; negative DTMIN/DTMAX (p.7-83) point to
+    time-dependent curves instead of holding a value."""
+    kf = ctx.kf
+    data = list(block.data)
+    if not data:
+        return
+
+    def timestep_card(li, tfields, lcid_fi, neg_curve):
+        lcid = _numint(kf, li, STD8, block.long, lcid_fi)
+        if not edit and lcid:
+            ctx.register_curve(lcid, TIME, DIMLESS, block.name + " LCIDSF")
+        for fi in tfields:
+            v = kf.get_number(li, STD8, block.long, fi)
+            if v is not None and v < 0 and fi in neg_curve:
+                if not edit:
+                    ctx.register_curve(int(-v), TIME, TIME,
+                                       block.name + " DTMIN/DTMAX")
+                continue
+            if edit:
+                kf.scale_field(li, STD8, block.long, fi, ctx.fac(TIME))
+
+    timestep_card(data[0], (0, 1, 4, 5, 6, 7), 3, {4, 5})
+    if len(data) > 1 and edit:
+        kf.scale_field(data[1], STD8, block.long, 0, ctx.fac(TIME))   # DTT
+    # data[2] (DTBL DTST DTVISC) holds flags only
+    if len(data) > 3:
+        timestep_card(data[3], (1, 4, 5, 6), 3, {4, 5})
+    if edit:
+        ctx.count(block.name)
+
+
+def h_mesh_bl(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol III p.8-2..8-3 (*MESH_BL), repeating cards PID NELTH BLTH BLFE
+    BLST BLDR.  BLTH is the boundary-layer thickness (length) for BLST = 1/2
+    but a growth scale factor for BLST = 3; BLFE is a scale coefficient for
+    BLST = 1/2 but the wall distance (length) for BLST = 3; both are ignored
+    for BLST = 0.  Negative NELTH/BLTH/BLFE reference time-dependent load
+    curves (Remark 5) and must not be rescaled."""
+    kf = ctx.kf
+    for li in block.data:
+        blst = _numint(kf, li, STD8, block.long, 4) or 0
+        dims = {1: DIMLESS}                       # NELTH: element count
+        if blst in (1, 2):
+            dims.update({2: LENGTH, 3: DIMLESS})  # BLTH thickness, BLFE coeff
+        elif blst == 3:
+            dims.update({2: DIMLESS, 3: LENGTH})  # BLTH factor, BLFE distance
+        for fi, dim in dims.items():
+            v = kf.get_number(li, STD8, block.long, fi)
+            if v is None:
+                continue
+            if v < 0:
+                if not edit:
+                    ctx.register_curve(int(-v), TIME, dim,
+                                       f"{block.name} (negative field "
+                                       f"{fi + 1})")
+                continue
+            if edit and dim is not DIMLESS:
+                kf.scale_field(li, STD8, block.long, fi, ctx.fac(dim))
+    if edit:
+        ctx.count(block.name)
+
+
 def h_blast(block: Block, ctx, edit: bool) -> None:
     """*LOAD_BLAST_ENHANCED and legacy *LOAD_BLAST."""
     kf = ctx.kf
@@ -889,6 +1055,10 @@ CUSTOM: Dict[str, Callable] = {
     "MAT_DAMPER_NONLINEAR_VISCOUS": h_smat_curve_mats,
     "MAT_CSCM": h_mat_cscm,
     "MAT_CSCM_CONCRETE": h_mat_cscm,
+    "ICFD_BOUNDARY_PRESCRIBED_VEL": h_icfd_prescribed_vel,
+    "ICFD_BOUNDARY_PRESCRIBED_PRE": h_icfd_prescribed_pre,
+    "ICFD_CONTROL_TIME": h_icfd_control_time,
+    "MESH_BL": h_mesh_bl,
     "CONSTRAINED_LAGRANGE_IN_SOLID": h_lagrange_in_solid,
     "CONSTRAINED_NODAL_RIGID_BODY_INERTIA": h_cnrb_inertia,
     "INITIAL_STRESS_SHELL": h_initial_stress_shell,

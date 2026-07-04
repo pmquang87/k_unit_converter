@@ -45,6 +45,9 @@ STIFF_LEN : Dim = (1, -2, -2)    # stiffness per length (tiebreak CN, stress/len
 STRESS_M3 : Dim = (-3, 3, 6)     # 1/stress^3 (MAT_022 ALPH nonlinear shear term)
 SPEC_HEAT : Dim = (0, 2, -2)     # specific heat, ASSUMING both systems share
                                  # the same temperature unit (K or degC)
+THERM_COND: Dim = (1, 1, -3)     # thermal conductivity W/(m*K), same
+                                 # temperature-unit assumption as SPEC_HEAT
+# surface tension (force/length) shares STIFF's (1, 0, -2) signature
 
 # Sentinel: temperature values are never rescaled (K<->degC offsets make that
 # unsafe); fields marked TEMP are classified and reported, not converted.
@@ -56,10 +59,11 @@ DIM_NAMES = {
     ACCEL: "acceleration", RATE: "1/time", DENSITY: "density",
     PRESSURE: "pressure/stress", FORCE: "force", MOMENT: "moment/energy",
     MASS_AREA: "mass/area", MASS_LEN: "mass/length", INERTIA: "mass inertia",
-    STIFF: "stiffness | energy/area", VISCOSITY: "viscosity (P*t)",
+    STIFF: "stiffness | energy/area | surf.tens.", VISCOSITY: "viscosity (P*t)",
     DC_FRIC: "1/velocity", ANG_ACCEL: "1/time^2", DAMP: "damping F/v",
     ROT_DAMP: "damping M/(rad/t)", STIFF_LEN: "stiffness/length",
     STRESS_M3: "1/stress^3", SPEC_HEAT: "specific heat (same temp unit)",
+    THERM_COND: "thermal conductivity (same temp unit)",
 }
 
 # names accepted by --curve LCID=<x>:<y> overrides
