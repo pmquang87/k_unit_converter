@@ -484,6 +484,98 @@ class NewFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(float(ln[30:40]), -5000.0)  # vz
         self.assertAlmostEqual(float(ln[50:60]), 2.0)      # vyr rad/s unchanged
 
+    def test_mat_composite_damage(self):
+        deck = ("*KEYWORD\n*MAT_COMPOSITE_DAMAGE_TITLE\nGrEP\n"
+                + F(1, 1450.0, "1.3E11", "4.5E10", "4.5E10", 0.15, 0.15, 0.25) + "\n"
+                + F("8.0E9", "8.0E9", "8.0E9", "2.0E9", 2.0, 1, 0) + "\n"
+                + F(1.5, -2.5, 0.0, 1.0, 0.0, 0.0) + "\n"
+                + F(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 45.0) + "\n"
+                + F("1.2E8", "2.5E9", "2.5E8", "2.5E7", "1.0E-27", "3.0E7",
+                    "2.0E7", "2.0E7") + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, SI, TON, out, self_check=False)
+        lines = _lines(out)
+        c1 = lines[lines.index("GrEP") + 1]
+        self.assertAlmostEqual(float(c1[10:20]), 1.45e-9)   # RO
+        self.assertAlmostEqual(float(c1[20:30]), 1.3e5)     # EA
+        self.assertAlmostEqual(float(c1[40:50]), 4.5e4)     # EC
+        self.assertAlmostEqual(float(c1[50:60]), 0.15)      # PRBA unchanged
+        c2 = lines[lines.index("GrEP") + 2]
+        self.assertAlmostEqual(float(c2[0:10]), 8000.0)     # GAB
+        self.assertAlmostEqual(float(c2[30:40]), 2000.0)    # KFAIL
+        self.assertAlmostEqual(float(c2[40:50]), 2.0)       # AOPT unchanged
+        c3 = lines[lines.index("GrEP") + 3]
+        self.assertAlmostEqual(float(c3[0:10]), 1500.0)     # XP
+        self.assertAlmostEqual(float(c3[10:20]), -2500.0)   # YP
+        self.assertAlmostEqual(float(c3[30:40]), 1.0)       # A1 unchanged
+        c4 = lines[lines.index("GrEP") + 4]
+        self.assertAlmostEqual(float(c4[60:70]), 45.0)      # BETA unchanged
+        c5 = lines[lines.index("GrEP") + 5]
+        self.assertAlmostEqual(float(c5[0:10]), 120.0)      # SC
+        self.assertAlmostEqual(float(c5[10:20]), 2500.0)    # XT
+        self.assertAlmostEqual(float(c5[40:50]), 1.0e-9)    # ALPH stress^-3
+        self.assertAlmostEqual(float(c5[50:60]), 30.0)      # SN
+
+    def test_mat_composite_damage_probe(self):
+        deck = ("*KEYWORD\n*MAT_022\n"
+                + F(1, 7850.0, "2.1E11", "2.1E11", "2.1E11", 0.3, 0.3, 0.3) + "\n"
+                + F("8.0E10", "8.0E10", "8.0E10", 0.0, 0.0, 0, 0) + "\n"
+                + F(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + F(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + F("1.2E8", "2.5E9", "2.5E8", "2.5E7", 0.0, 0.0, 0.0, 0.0)
+                + "\n*END\n")
+        v = detect(_write(deck))
+        self.assertEqual(v.system, SI)
+        self.assertTrue(any("material density 7850" in e for e in v.evidence),
+                        v.evidence)
+
+    def test_part_composite(self):
+        deck = ("*KEYWORD\n*PART_COMPOSITE\nTopSheet\n"
+                + F(12, 2, 0.0, 0.0, 1.5, 0, 0, 0) + "\n"
+                + F(1, 0.001, 0.0, 0, 1, 0.001, 90.0, 0) + "\n"
+                + F(1, 0.001, 45.0, 0, 1, 0.001, -45.0, 0) + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, SI, TON, out, self_check=False)
+        lines = _lines(out)
+        pi = lines.index("*PART_COMPOSITE")
+        hdr = lines[pi + 2]
+        self.assertEqual(int(hdr[0:10]), 12)                  # PID untouched
+        self.assertAlmostEqual(float(hdr[40:50]), 1.5e-9)     # MAREA mass/area
+        ply1, ply2 = lines[pi + 3], lines[pi + 4]
+        self.assertEqual(int(ply1[0:10]), 1)                  # MID1 untouched
+        self.assertAlmostEqual(float(ply1[10:20]), 1.0)       # THICK1 -> mm
+        self.assertAlmostEqual(float(ply1[50:60]), 1.0)       # THICK2 -> mm
+        self.assertAlmostEqual(float(ply1[60:70]), 90.0)      # B2 degrees
+        self.assertAlmostEqual(float(ply2[20:30]), 45.0)      # B1 degrees
+        self.assertAlmostEqual(float(ply2[60:70]), -45.0)     # B2 degrees
+
+    def test_part_composite_long_optcard(self):
+        deck = ("*KEYWORD\n*PART_COMPOSITE_LONG\nSheet\n"
+                + "OPTCARD".ljust(10) + F(103) + "\n"
+                + F(13, 2, 0.0, 0.0, 0.0, 0, 0, 0) + "\n"
+                + F(1, 0.002, 30.0, 0, 5, 0.83) + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, SI, TON, out, self_check=False)
+        lines = _lines(out)
+        pi = lines.index("*PART_COMPOSITE_LONG")
+        self.assertTrue(lines[pi + 2].startswith("OPTCARD"))  # card kept as-is
+        self.assertEqual(int(lines[pi + 3][0:10]), 13)        # PID after OPTCARD
+        ply = lines[pi + 4]
+        self.assertAlmostEqual(float(ply[10:20]), 2.0)        # THICK1 -> mm
+        self.assertAlmostEqual(float(ply[20:30]), 30.0)       # B1 degrees
+        self.assertAlmostEqual(float(ply[40:50]), 5.0)        # PLYID1 untouched
+        self.assertAlmostEqual(float(ply[50:60]), 0.83)       # SHRFAC1 untouched
+
+    def test_part_composite_tshell_refused(self):
+        deck = ("*KEYWORD\n*PART_COMPOSITE_TSHELL\nSheet\n"
+                + F(12, 1, 1.0) + "\n" + F(1, 0.001, 0.0, 0) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaises(ConvertError):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
+
     def test_gui_imports(self):
         import kunit.gui  # noqa: F401  (no Tk instantiation)
 

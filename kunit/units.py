@@ -42,6 +42,7 @@ DC_FRIC   : Dim = (0, -1, 1)     # contact friction decay coeff (1/velocity)
 DAMP      : Dim = (1, 0, -1)     # translational damping force/velocity
 ROT_DAMP  : Dim = (1, 2, -1)     # rotational damping moment/(rad/time)
 STIFF_LEN : Dim = (1, -2, -2)    # stiffness per length (tiebreak CN, stress/length)
+STRESS_M3 : Dim = (-3, 3, 6)     # 1/stress^3 (MAT_022 ALPH nonlinear shear term)
 SPEC_HEAT : Dim = (0, 2, -2)     # specific heat, ASSUMING both systems share
                                  # the same temperature unit (K or degC)
 
@@ -58,7 +59,7 @@ DIM_NAMES = {
     STIFF: "stiffness | energy/area", VISCOSITY: "viscosity (P*t)",
     DC_FRIC: "1/velocity", ANG_ACCEL: "1/time^2", DAMP: "damping F/v",
     ROT_DAMP: "damping M/(rad/t)", STIFF_LEN: "stiffness/length",
-    SPEC_HEAT: "specific heat (same temp unit)",
+    STRESS_M3: "1/stress^3", SPEC_HEAT: "specific heat (same temp unit)",
 }
 
 # names accepted by --curve LCID=<x>:<y> overrides

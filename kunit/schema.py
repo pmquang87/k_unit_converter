@@ -19,9 +19,9 @@ from .parser import STD8, Block, KFile, parse_number
 from .units import (ACCEL, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC, DENSITY,
                     Dim, DIMLESS, FORCE, FREQ, INERTIA, L4, LENGTH, MASS,
                     MASS_AREA, MASS_LEN, MOMENT, PRESSURE, RATE, ROT_DAMP,
-                    SPEC_HEAT, STIFF, STIFF_LEN, TEMP, TIME, VELOCITY,
-                    VISCOSITY, BLAST_BUILTIN_UNITS, BLAST_UNIT_SYSTEMS,
-                    blast_unit5_factors)
+                    SPEC_HEAT, STIFF, STIFF_LEN, STRESS_M3, TEMP, TIME,
+                    VELOCITY, VISCOSITY, BLAST_BUILTIN_UNITS,
+                    BLAST_UNIT_SYSTEMS, blast_unit5_factors)
 
 STRAIN = DIMLESS
 
@@ -104,6 +104,20 @@ SPECS: Dict[str, Spec] = {
         C({0: SPEC_HEAT, 1: PRESSURE}),
         C()],                                    # card 4 (see EDIT_EXTRA)
         probe={"ro": (0, 1), "e": (0, 3)}),
+    # R16 Vol II p.2-245..2-250 (*MAT_COMPOSITE_DAMAGE / MAT_022):
+    # Card1 MID RO EA EB EC PRBA PRCA PRCB; Card2 GAB GBC GCA KFAIL AOPT
+    # MACF ATRACK; Card3 XP YP ZP A1 A2 A3; Card4 V1 V2 V3 D1 D2 D3 BETA;
+    # Card5 SC XT YT YC ALPH SN SYZ SZX.  KFAIL is a bulk modulus and
+    # XP/YP/ZP are coordinates; ALPH is "in units of [stress^-3]" (p.2-249);
+    # Poisson ratios, A/V/D direction vectors and BETA (degrees) stay.
+    "MAT_COMPOSITE_DAMAGE": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 3: PRESSURE, 4: PRESSURE}),
+        C({0: PRESSURE, 1: PRESSURE, 2: PRESSURE, 3: PRESSURE}),
+        C({0: LENGTH, 1: LENGTH, 2: LENGTH}),
+        C(),
+        C({0: PRESSURE, 1: PRESSURE, 2: PRESSURE, 3: PRESSURE, 4: STRESS_M3,
+           5: PRESSURE, 6: PRESSURE, 7: PRESSURE})],
+        probe={"ro": (0, 1), "e": (0, 2)}),
     "MAT_NULL": Spec(cards=[
         C({1: DENSITY, 2: PRESSURE, 3: VISCOSITY, 6: PRESSURE})],
         probe={"ro": (0, 1)}),
@@ -187,7 +201,8 @@ _MAT_ALIASES = {
     "MAT_001": "MAT_ELASTIC", "MAT_003": "MAT_PLASTIC_KINEMATIC",
     "MAT_008": "MAT_HIGH_EXPLOSIVE_BURN", "MAT_009": "MAT_NULL",
     "MAT_015": "MAT_JOHNSON_COOK",
-    "MAT_020": "MAT_RIGID", "MAT_024": "MAT_PIECEWISE_LINEAR_PLASTICITY",
+    "MAT_020": "MAT_RIGID", "MAT_022": "MAT_COMPOSITE_DAMAGE",
+    "MAT_024": "MAT_PIECEWISE_LINEAR_PLASTICITY",
     "MAT_140": "MAT_VACUUM",
     "MAT_S01": "MAT_SPRING_ELASTIC", "MAT_S02": "MAT_DAMPER_VISCOUS",
     "MAT_S03": "MAT_SPRING_ELASTOPLASTIC",
@@ -745,6 +760,33 @@ def h_cnrb_inertia(block: Block, ctx, edit: bool) -> None:
     ctx.count("CONSTRAINED_NODAL_RIGID_BODY_INERTIA")
 
 
+def h_part_composite(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.37-18..37-27 (*PART_COMPOSITE[_LONG]): Card1 HEADING;
+    irregular optional Card2 (only if it starts with 'OPTCARD'; OPTC IRPL,
+    flags only); Card3a PID ELFORM SHRF NLOC MAREA HGID ADPOPT THSHEL
+    (MAREA = mass/area); then repeating layer cards, two layers per card
+    MID1 THICK1 B1 TMID1 MID2 THICK2 B2 TMID2 or one per card with LONG
+    (MID1 THICK1 B1 TMID1 PLYID1 SHRFAC1).  THICKi is a length; Bi is a
+    material angle in degrees.  The TSHELL / IGA_SHELL / CONTACT variants
+    have different card layouts and deliberately stay unknown."""
+    if not edit:
+        return
+    kf = ctx.kf
+    data = list(block.data)
+    idx = 1                                      # skip HEADING
+    if (idx < len(data)
+            and kf.lines[data[idx]].lstrip().upper().startswith("OPTCARD")):
+        idx += 1
+    if idx < len(data):
+        kf.scale_field(data[idx], STD8, block.long, 4, ctx.fac(MASS_AREA))
+        idx += 1
+    thick_fields = (1,) if block.name.endswith("_LONG") else (1, 5)
+    for li in data[idx:]:
+        for fi in thick_fields:
+            kf.scale_field(li, STD8, block.long, fi, ctx.fac(LENGTH))
+    ctx.count(block.name)
+
+
 def x_scan_part(block: Block, ctx) -> None:
     """Collect (pid, secid, mid) so DRO can classify discrete materials."""
     kf = ctx.kf
@@ -765,6 +807,8 @@ CUSTOM: Dict[str, Callable] = {
     "LOAD_NODE_POINT": h_load_node_or_rb,
     "LOAD_NODE_SET": h_load_node_or_rb,
     "LOAD_RIGID_BODY": h_load_node_or_rb,
+    "PART_COMPOSITE": h_part_composite,
+    "PART_COMPOSITE_LONG": h_part_composite,
     "SECTION_BEAM": h_section_beam,
     "SECTION_DISCRETE": h_section_discrete,
     "MAT_SPRING_ELASTIC": h_smat_spring_elastic,
