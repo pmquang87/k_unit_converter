@@ -1,5 +1,7 @@
 # kunit — LS-DYNA .k deck unit-system converter
 
+[![tests](https://github.com/pmquang87/k_unit_converter/actions/workflows/ci.yml/badge.svg)](https://github.com/pmquang87/k_unit_converter/actions/workflows/ci.yml)
+
 Converts a self-contained LS-DYNA keyword deck (or a whole `*INCLUDE` tree)
 between **any two unit systems** (any mass–length–time triple), with
 **auto-detection** of the deck's current units, built-in self-verification,
