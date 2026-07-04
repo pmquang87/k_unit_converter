@@ -43,6 +43,8 @@ DAMP      : Dim = (1, 0, -1)     # translational damping force/velocity
 ROT_DAMP  : Dim = (1, 2, -1)     # rotational damping moment/(rad/time)
 STIFF_LEN : Dim = (1, -2, -2)    # stiffness per length (tiebreak CN, stress/length)
 STRESS_M3 : Dim = (-3, 3, 6)     # 1/stress^3 (MAT_022 ALPH nonlinear shear term)
+PWR_VOL   : Dim = (1, -1, -3)    # power/volume: EOS energy-deposition rate
+                                 # dE/dt, E being energy per reference volume
 SPEC_HEAT : Dim = (0, 2, -2)     # specific heat, ASSUMING both systems share
                                  # the same temperature unit (K or degC)
 THERM_COND: Dim = (1, 1, -3)     # thermal conductivity W/(m*K), same
@@ -62,7 +64,8 @@ DIM_NAMES = {
     STIFF: "stiffness | energy/area | surf.tens.", VISCOSITY: "viscosity (P*t)",
     DC_FRIC: "1/velocity", ANG_ACCEL: "1/time^2", DAMP: "damping F/v",
     ROT_DAMP: "damping M/(rad/t)", STIFF_LEN: "stiffness/length",
-    STRESS_M3: "1/stress^3", SPEC_HEAT: "specific heat (same temp unit)",
+    STRESS_M3: "1/stress^3", PWR_VOL: "power/volume",
+    SPEC_HEAT: "specific heat (same temp unit)",
     THERM_COND: "thermal conductivity (same temp unit)",
 }
 
@@ -77,6 +80,7 @@ DIM_BY_NAME = {
     "pressure": PRESSURE, "stress": PRESSURE, "modulus": PRESSURE,
     "force": FORCE, "moment": MOMENT, "energy": ENERGY,
     "stiffness": STIFF, "damping": DAMP, "viscosity": VISCOSITY,
+    "powervol": PWR_VOL,
 }
 
 

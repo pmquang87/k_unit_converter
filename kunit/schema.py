@@ -18,7 +18,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 from .parser import STD8, Block, KFile, parse_number
 from .units import (ACCEL, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC, DENSITY,
                     Dim, DIM_NAMES, DIMLESS, FORCE, FREQ, INERTIA, L4, LENGTH,
-                    MASS, MASS_AREA, MASS_LEN, MOMENT, PRESSURE, RATE,
+                    MASS, MASS_AREA, MASS_LEN, MOMENT, PRESSURE, PWR_VOL, RATE,
                     ROT_DAMP, SPEC_HEAT, STIFF, STIFF_LEN, STRESS_M3, TEMP,
                     THERM_COND, TIME, VELOCITY, VISCOSITY, VOLUME,
                     BLAST_BUILTIN_UNITS, BLAST_UNIT_SYSTEMS, CSCM_UNITS,
@@ -160,7 +160,14 @@ SPECS: Dict[str, Spec] = {
     "EOS_JWL": Spec(cards=[C({1: PRESSURE, 2: PRESSURE, 6: PRESSURE})]),
     "EOS_LINEAR_POLYNOMIAL": Spec(cards=[
         C({i: PRESSURE for i in range(1, 8)}), C({0: PRESSURE})]),
-    "EOS_GRUNEISEN": Spec(cards=[C({1: VELOCITY, 7: PRESSURE})]),
+    # R16 Vol II p.1-15..1-16 (*EOS_GRUNEISEN): Card1 EOSID C S1 S2 S3 GAMMAO
+    # A E0 - C is the vs(vp) curve intercept (velocity units); S1-S3, GAMMAO
+    # and A are unitless; E0 is the initial internal energy per unit reference
+    # volume (pressure dims: p = ... + (GAMMAO + A*mu)*E).  Card2 V0 (unused)
+    # LCID - V0 is the initial relative volume (dimensionless); LCID defines
+    # the energy-deposition rate dE/dt as a function of time (power/volume).
+    "EOS_GRUNEISEN": Spec(cards=[C({1: VELOCITY, 7: PRESSURE}), C()],
+                          curves=[(1, 2, TIME, PWR_VOL)]),
 
     # ── loads / boundary / initial ──────────────────────────────────────────
     "LOAD_SEGMENT": Spec(repeat=C({2: TIME}), curves=[(0, 0, TIME, PRESSURE)]),

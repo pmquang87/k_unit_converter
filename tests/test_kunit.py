@@ -238,6 +238,43 @@ class ConvertTests(unittest.TestCase):
         self.assertAlmostEqual(float(toks[1]), 1700.0)
         self.assertAlmostEqual(float(toks[3]), 279.9996)
 
+    def test_eos_gruneisen_card2(self):
+        # R16 Vol II p.1-15: Card2 is V0 (dimensionless), blank, LCID
+        # (energy-deposition rate dE/dt vs time, power/volume ordinates)
+        deck = """*KEYWORD
+*EOS_GRUNEISEN_TITLE
+water eos
+         1    1480.0      1.97       0.0       0.0      0.11       0.03.00000E+5
+       0.0                   7
+*EOS_GRUNEISEN
+         2     150.0      1.97       0.0       0.0       0.0       0.0       0.0
+       0.0
+*DEFINE_CURVE
+         7         0       1.0       1.0       0.0       0.0         0         0
+                 0.0          1.00000E6
+                 1.0          1.00000E6
+*END
+"""
+        lines, ctx = self._conv(deck)
+        self.assertFalse(any("EOS_GRUNEISEN" in w for w in ctx.warnings),
+                         ctx.warnings)
+        ei = lines.index("water eos")
+        c1 = lines[ei + 1]
+        self.assertAlmostEqual(float(c1[10:20]), 1.48e6)     # C x1000
+        self.assertAlmostEqual(float(c1[70:80]), 0.3)        # E0 x1e-6
+        c2 = lines[ei + 2]
+        self.assertAlmostEqual(float(c2[0:10]), 0.0)         # V0 unscaled
+        self.assertEqual(int(c2[20:30]), 7)                  # LCID untouched
+        # V0-only Card2 (no LCID) must pass silently too
+        e2 = lines.index("*EOS_GRUNEISEN")
+        self.assertAlmostEqual(float(lines[e2 + 1][10:20]), 1.5e5)
+        self.assertAlmostEqual(float(lines[e2 + 2][0:10]), 0.0)
+        # curve 7 ordinates carry dE/dt: x1e-6 for kg-m-s -> ton-mm-s
+        di = lines.index("*DEFINE_CURVE")
+        self.assertAlmostEqual(float(lines[di + 2][0:20]), 0.0)
+        self.assertAlmostEqual(float(lines[di + 2][20:40]), 1.0)
+        self.assertAlmostEqual(float(lines[di + 3][0:20]), 1.0)
+
 
 class NewFeatureTests(unittest.TestCase):
     def test_self_check_and_roundtrip(self):
