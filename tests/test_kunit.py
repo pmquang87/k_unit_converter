@@ -427,6 +427,36 @@ class NewFeatureTests(unittest.TestCase):
         # include reference unchanged for in-place conversion
         self.assertIn("child.k", "\n".join(_lines(p)))
 
+    def test_keyword_line_trailing_text(self):
+        deck = ("*KEYWORD MEMORY=800000000 NCPU=4\n"
+                "*ELEMENT_SOLID (TEN NODES FORMAT)\n"
+                + F(1, 1, w=8) + "\n"
+                + F(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, w=8) + "\n"
+                "*NODE\n"
+                "       1             1.0             0.0             0.0\n"
+                "*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        ctx = convert(p, SI, TON, out, self_check=False)
+        self.assertEqual(ctx.unknown, {})
+        li = _lines(out)
+        ni = [i for i, ln in enumerate(li) if ln.startswith("*NODE")][0]
+        self.assertAlmostEqual(float(li[ni + 1][8:24]), 1000.0)
+        # ten-node connectivity untouched
+        self.assertIn(F(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, w=8), li)
+
+    def test_initial_velocity_node(self):
+        deck = ("*KEYWORD\n*INITIAL_VELOCITY_NODE\n"
+                + F(7, 10.0, 0.0, -5.0, 0.0, 2.0, 0.0, 0) + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, SI, TON, out, self_check=False)
+        li = _lines(out)
+        ln = li[li.index("*INITIAL_VELOCITY_NODE") + 1]
+        self.assertAlmostEqual(float(ln[10:20]), 10000.0)  # vx mm/s
+        self.assertAlmostEqual(float(ln[30:40]), -5000.0)  # vz
+        self.assertAlmostEqual(float(ln[50:60]), 2.0)      # vyr rad/s unchanged
+
     def test_gui_imports(self):
         import kunit.gui  # noqa: F401  (no Tk instantiation)
 

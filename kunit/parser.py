@@ -88,7 +88,13 @@ class KFile:
                     long, name = True, name[:-1].strip()
                 elif name.endswith("-"):
                     long, name = False, name[:-1].strip()
-                name = name.strip().upper()
+                # the keyword is the first whitespace token: trailing text like
+                # '*KEYWORD MEMORY=... NCPU=4' or LS-PrePost's
+                # '*ELEMENT_SOLID (TEN NODES FORMAT)' is not part of the name
+                tokens = name.strip().upper().split()
+                if tokens and tokens[0] == "+":
+                    long, tokens = True, tokens[1:]
+                name = tokens[0] if tokens else ""
                 if name == "KEYWORD" and "LONG" in raw.upper():
                     m = re.search(r"LONG\s*=\s*([A-Z])", raw.upper())
                     if m and m.group(1) == "Y":
