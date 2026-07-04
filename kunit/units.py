@@ -39,6 +39,15 @@ INERTIA   : Dim = (1, 2, 0)      # mass moment of inertia
 STIFF     : Dim = (1, 0, -2)     # translational stiffness force/length
 VISCOSITY : Dim = (1, -1, -1)    # Pa*s; also pressure impulse (stress*time)
 DC_FRIC   : Dim = (0, -1, 1)     # contact friction decay coeff (1/velocity)
+DAMP      : Dim = (1, 0, -1)     # translational damping force/velocity
+ROT_DAMP  : Dim = (1, 2, -1)     # rotational damping moment/(rad/time)
+STIFF_LEN : Dim = (1, -2, -2)    # stiffness per length (tiebreak CN, stress/length)
+SPEC_HEAT : Dim = (0, 2, -2)     # specific heat, ASSUMING both systems share
+                                 # the same temperature unit (K or degC)
+
+# Sentinel: temperature values are never rescaled (K<->degC offsets make that
+# unsafe); fields marked TEMP are classified and reported, not converted.
+TEMP = "TEMP"
 
 DIM_NAMES = {
     DIMLESS: "dimensionless", MASS: "mass", LENGTH: "length", TIME: "time",
@@ -46,9 +55,33 @@ DIM_NAMES = {
     ACCEL: "acceleration", RATE: "1/time", DENSITY: "density",
     PRESSURE: "pressure/stress", FORCE: "force", MOMENT: "moment/energy",
     MASS_AREA: "mass/area", MASS_LEN: "mass/length", INERTIA: "mass inertia",
-    STIFF: "stiffness", VISCOSITY: "viscosity (P*t)", DC_FRIC: "1/velocity",
-    ANG_ACCEL: "1/time^2",
+    STIFF: "stiffness | energy/area", VISCOSITY: "viscosity (P*t)",
+    DC_FRIC: "1/velocity", ANG_ACCEL: "1/time^2", DAMP: "damping F/v",
+    ROT_DAMP: "damping M/(rad/t)", STIFF_LEN: "stiffness/length",
+    SPEC_HEAT: "specific heat (same temp unit)",
 }
+
+# names accepted by --curve LCID=<x>:<y> overrides
+DIM_BY_NAME = {
+    "none": DIMLESS, "dimensionless": DIMLESS, "strain": DIMLESS,
+    "mass": MASS, "length": LENGTH, "disp": LENGTH, "displacement": LENGTH,
+    "time": TIME, "area": AREA, "volume": VOLUME,
+    "velocity": VELOCITY, "vel": VELOCITY, "accel": ACCEL,
+    "acceleration": ACCEL, "angvel": ANG_VEL, "angaccel": ANG_ACCEL,
+    "rate": RATE, "freq": FREQ, "frequency": FREQ, "density": DENSITY,
+    "pressure": PRESSURE, "stress": PRESSURE, "modulus": PRESSURE,
+    "force": FORCE, "moment": MOMENT, "energy": ENERGY,
+    "stiffness": STIFF, "damping": DAMP, "viscosity": VISCOSITY,
+}
+
+
+def parse_dim_name(name: str) -> Dim:
+    try:
+        return DIM_BY_NAME[name.strip().lower()]
+    except KeyError:
+        raise ValueError(
+            f"unknown dimension name {name!r} (choose from: "
+            f"{', '.join(sorted(DIM_BY_NAME))})") from None
 
 # ── base unit sizes (exact) ──────────────────────────────────────────────────
 _LB = Fraction(45359237, 10**8)          # lbm in kg (exact by definition)

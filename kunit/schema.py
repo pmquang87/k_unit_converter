@@ -7,6 +7,8 @@ Every keyword encountered in a deck must resolve to one of:
   * a soft/hard flag (known-unsupported -> loud warning / abort).
 Anything else is UNKNOWN and aborts the conversion unless --allow-unknown,
 because silently passing a dimensional card through would corrupt physics.
+
+All field->dimension maps are verified against the LS-DYNA R16 manuals.
 """
 from __future__ import annotations
 
@@ -14,17 +16,19 @@ from dataclasses import dataclass, field as dfield
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from .parser import STD8, Block, KFile, parse_number
-from .units import (ACCEL, ANG_ACCEL, ANG_VEL, AREA, DC_FRIC, DENSITY, Dim,
-                    DIMLESS, FORCE, FREQ, INERTIA, L4, LENGTH, MASS, MASS_AREA,
-                    MASS_LEN, MOMENT, PRESSURE, RATE, TIME, VELOCITY, VISCOSITY,
-                    BLAST_BUILTIN_UNITS, BLAST_UNIT_SYSTEMS, blast_unit5_factors)
+from .units import (ACCEL, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC, DENSITY,
+                    Dim, DIMLESS, FORCE, FREQ, INERTIA, L4, LENGTH, MASS,
+                    MASS_AREA, MASS_LEN, MOMENT, PRESSURE, RATE, ROT_DAMP,
+                    SPEC_HEAT, STIFF, STIFF_LEN, TEMP, TIME, VELOCITY,
+                    VISCOSITY, BLAST_BUILTIN_UNITS, BLAST_UNIT_SYSTEMS,
+                    blast_unit5_factors)
 
 STRAIN = DIMLESS
 
 
 @dataclass
 class Card:
-    dims: Dict[int, Dim] = dfield(default_factory=dict)
+    dims: Dict[int, object] = dfield(default_factory=dict)  # Dim or TEMP
     widths: Sequence[int] = tuple(STD8)
     pad_right: Dict[int, int] = dfield(default_factory=dict)
     heading: bool = False       # free-text line, never scaled
@@ -92,6 +96,14 @@ SPECS: Dict[str, Spec] = {
         C(),                                     # EPS1-8 plastic strains
         C({i: PRESSURE for i in range(8)})],     # ES1-8 stresses
         probe={"ro": (0, 1), "e": (0, 2)}),
+    # R16 Vol II p.2-202: Card1 MID RO G E PR DTF VP RATEOP;
+    # Card2 A B N C M TM TR EPS0; Card3 CP PC SPALL IT D1-D4; Card4 rate form.
+    "MAT_JOHNSON_COOK": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 3: PRESSURE, 5: TIME}),
+        C({0: PRESSURE, 1: PRESSURE, 5: TEMP, 6: TEMP, 7: RATE}),
+        C({0: SPEC_HEAT, 1: PRESSURE}),
+        C()],                                    # card 4 (see EDIT_EXTRA)
+        probe={"ro": (0, 1), "e": (0, 3)}),
     "MAT_NULL": Spec(cards=[
         C({1: DENSITY, 2: PRESSURE, 3: VISCOSITY, 6: PRESSURE})],
         probe={"ro": (0, 1)}),
@@ -128,6 +140,9 @@ SPECS: Dict[str, Spec] = {
         C({0: LENGTH, 1: LENGTH, 2: LENGTH})]),
     "INITIAL_DETONATION": Spec(repeat=C(
         {1: LENGTH, 2: LENGTH, 3: LENGTH, 4: TIME})),
+    # R16 Vol I p.28-91: ISSID CSID LCID PSID VID IZSHEAR ISTIFF
+    "INITIAL_STRESS_SECTION": Spec(cards=[C()],
+                                   curves=[(0, 2, TIME, PRESSURE)]),
     "CONSTRAINED_SPOTWELD": Spec(repeat=C({2: FORCE, 3: FORCE, 6: TIME})),
 
     # ── control / database ──────────────────────────────────────────────────
@@ -158,16 +173,22 @@ SPECS: Dict[str, Spec] = {
         C({0: LENGTH, 1: LENGTH, 2: LENGTH})]),
     "DEFINE_FRICTION": Spec(cards=[C({3: DC_FRIC, 4: PRESSURE})],
                             repeat=C({4: DC_FRIC, 5: PRESSURE})),
-
-    # ── section beam (elform-dependent, handled in custom below) ────────────
+    # R16 Vol I p.17-146: LCID SIDR DIST TSTART TEND TRISE VMAX
+    "DEFINE_CURVE_SMOOTH": Spec(repeat=C(
+        {2: LENGTH, 3: TIME, 4: TIME, 5: TIME, 6: VELOCITY})),
 }
 
-# MAT numeric aliases
+# numeric aliases
 _MAT_ALIASES = {
     "MAT_001": "MAT_ELASTIC", "MAT_003": "MAT_PLASTIC_KINEMATIC",
     "MAT_008": "MAT_HIGH_EXPLOSIVE_BURN", "MAT_009": "MAT_NULL",
+    "MAT_015": "MAT_JOHNSON_COOK",
     "MAT_020": "MAT_RIGID", "MAT_024": "MAT_PIECEWISE_LINEAR_PLASTICITY",
     "MAT_140": "MAT_VACUUM",
+    "MAT_S01": "MAT_SPRING_ELASTIC", "MAT_S02": "MAT_DAMPER_VISCOUS",
+    "MAT_S03": "MAT_SPRING_ELASTOPLASTIC",
+    "MAT_S04": "MAT_SPRING_NONLINEAR_ELASTIC",
+    "MAT_S05": "MAT_DAMPER_NONLINEAR_VISCOUS",
     "EOS_001": "EOS_LINEAR_POLYNOMIAL", "EOS_002": "EOS_JWL",
     "EOS_004": "EOS_GRUNEISEN",
 }
@@ -188,16 +209,21 @@ WHITELIST = {
     "CONSTRAINED_EXTRA_NODES_SET", "CONSTRAINED_RIGID_BODIES",
     "DEFINE_COORDINATE_NODES", "DEFINE_SD_ORIENTATION",
     "ALE_MULTI-MATERIAL_GROUP", "MAT_ADD_PORE_AIR",
+    # strain tensors are dimensionless
+    "INITIAL_STRAIN_SHELL", "INITIAL_STRAIN_SHELL_SET",
+    "INITIAL_STRAIN_SOLID", "INITIAL_STRAIN_SOLID_SET",
 }
 WHITELIST_PREFIXES = (
     "SET_", "BOUNDARY_SPC", "DATABASE_HISTORY", "CONTROL_MPP_",
     "DEFORMABLE_TO_RIGID", "INTERFACE_SPRINGBACK",
 )
-# known-unsupported: abort (hard) or leave-with-warning (soft)
+# known-unsupported: abort (hard). *INCLUDE is bypassed by --follow-includes.
 HARD_FLAGS = {
-    "INCLUDE": "converts one self-contained file - convert includes separately",
+    "INCLUDE": "multi-file deck - re-run with --follow-includes to convert "
+               "the whole tree",
     "INCLUDE_TRANSFORM": "carries its own scale factors",
-    "INCLUDE_PATH": "converts one self-contained file",
+    "INCLUDE_PATH": "search-path includes not supported - flatten the deck "
+                    "or use plain *INCLUDE with relative paths",
     "PARAMETER": "parameters may feed dimensional fields",
     "PARAMETER_EXPRESSION": "parameters may feed dimensional fields",
     "DEFINE_TRANSFORMATION": "carries its own scale factors",
@@ -215,27 +241,33 @@ def _numint(kf: KFile, li: int, widths, long, fi) -> Optional[int]:
     return int(v) if v is not None else None
 
 
+def _strip_title(block: Block, data):
+    opts = block.name.split("_")
+    if "TITLE" in opts or "ID" in opts:
+        return data[1:]
+    return data
+
+
 def h_define_curve(block: Block, ctx, edit: bool) -> None:
     kf = ctx.kf
-    data = list(block.data)
-    if "TITLE" in block.name.split("_"):
-        data = data[1:]
+    data = _strip_title(block, list(block.data))
     if not data:
         return
     lcid = _numint(kf, data[0], STD8, block.long, 0)
     if not edit:
-        ctx.curve_blocks.setdefault(lcid, []).append(block)
+        ctx.curve_blocks.setdefault(lcid, []).append((kf, block))
         return
     dims = ctx.curve_dims.get(lcid)
     if not dims:
         ctx.warn(f"*{block.name} lcid={lcid}: no referencing keyword tells me "
-                 "its axis dimensions - data points left UNCHANGED. Scale "
-                 "manually if this curve is dimensional.")
+                 "its axis dimensions - data points left UNCHANGED. Use "
+                 "--curve {}=<xdim>:<ydim> if it is dimensional.".format(lcid))
         ctx.count(block.name + " (unreferenced, unchanged)")
         return
     if len(dims) > 1:
         ctx.error(f"*{block.name} lcid={lcid}: conflicting dimension demands "
-                  f"from referencers: {sorted(dims.items())}")
+                  f"from referencers: {sorted(dims.items())} - resolve with "
+                  f"--curve {lcid}=<xdim>:<ydim>")
         return
     (xdim, ydim), _src = next(iter(dims.items()))
     fx, fy = ctx.fac(xdim), ctx.fac(ydim)
@@ -249,14 +281,21 @@ def h_define_curve(block: Block, ctx, edit: bool) -> None:
 
 def h_define_table(block: Block, ctx, edit: bool) -> None:
     kf = ctx.kf
-    data = list(block.data)
-    if "TITLE" in block.name.split("_"):
-        data = data[1:]
+    data = _strip_title(block, list(block.data))
     if not data:
         return
     tbid = _numint(kf, data[0], STD8, block.long, 0)
     if not edit:
-        ctx.table_blocks[tbid] = block
+        ctx.table_blocks[tbid] = (kf, block)
+        # 'value, lcid' pair form: second numeric field names the sub-curve
+        pairs = []
+        for li in data[1:]:
+            fl = kf.fields(li, CURVE_W, block.long)
+            sub = parse_number(fl[1][0]) if len(fl) > 1 else None
+            if sub:
+                pairs.append(int(sub))
+        ctx.table_pairs[tbid] = pairs
+        ctx.table_nvalues[tbid] = len(data) - 1
         return
     entry = ctx.table_dims.get(tbid)
     if not entry:
@@ -266,7 +305,7 @@ def h_define_table(block: Block, ctx, edit: bool) -> None:
     fv = ctx.fac(vdim)
     kf.scale_field(data[0], STD8, block.long, 2, fv)   # OFFA
     for li in data[1:]:
-        kf.scale_field(li, (20, 20), block.long, 0, fv)
+        kf.scale_field(li, CURVE_W, block.long, 0, fv)
     ctx.count(block.name)
 
 
@@ -330,33 +369,48 @@ def h_contact(block: Block, ctx, edit: bool) -> None:
     if not edit:
         return
     kf = ctx.kf
-    data = list(block.data)
-    opts = block.name.split("_")
-    if "ID" in opts or "TITLE" in opts:
-        data = data[1:]
+    data = _strip_title(block, list(block.data))
+    tiebreak = "TIEBREAK" in block.name
     plan = [
         {},                                              # card1: ids
         {2: DC_FRIC, 3: PRESSURE, 6: TIME, 7: TIME},     # card2
         {2: LENGTH, 3: LENGTH},                          # card3: SST MST
-        {},                                              # A (flags)
-        {6: LENGTH, 7: PRESSURE},                        # B: SLDTHK SLDSTF
     ]
+    if tiebreak:
+        # R16 Vol I p.11-35 Card 4: OPTION NFLS SFLS PARAM ERATEN ERATES
+        # CT2CN CN.  ERATEN/ERATES = energy/area, CN = stiffness/length.
+        plan.append({1: PRESSURE, 2: PRESSURE, 4: STIFF, 5: STIFF,
+                     7: STIFF_LEN})
+    else:
+        plan.append({})                                  # A (flags)
+    plan.append({6: LENGTH, 7: PRESSURE})                # B: SLDTHK SLDSTF
     for ci, li in enumerate(data):
         if ci >= len(plan):
             ctx.warn(f"*{block.name}: optional card {ci + 1} left unscaled "
-                     "(advanced options C+ not modelled) - verify manually.")
+                     "(advanced options not modelled) - verify manually.")
             break
+        if tiebreak and ci == 3:
+            option = abs(_numint(kf, li, STD8, block.long, 0) or 0)
+            if option in (13, 14):
+                ctx.error(f"*{block.name}: TIEBREAK OPTION={option} adds "
+                          "rate-dependent fracture cards that are not "
+                          "modelled - convert manually.")
+                return
+            param = kf.get_number(li, STD8, block.long, 3)
+            if param:
+                ctx.warn(f"*{block.name}: TIEBREAK PARAM={param} left "
+                         "unscaled - its meaning (and units) depend on "
+                         "OPTION (length for 6/8/9/11, exponent for 2...) - "
+                         "verify against the manual.")
         for fi, dim in plan[ci].items():
             kf.scale_field(li, STD8, block.long, fi, ctx.fac(dim))
-    ctx.count("CONTACT_*")
+    ctx.count("CONTACT_*" + (" TIEBREAK" if tiebreak else ""))
 
 
-def h_mat_024(block: Block, ctx, edit: bool) -> None:
-    """Curve/table registration for MAT_PIECEWISE_LINEAR_PLASTICITY."""
+def h_mat_024(block: Block, ctx) -> None:
+    """Curve/table registration for MAT_PIECEWISE_LINEAR_PLASTICITY (scan)."""
     kf = ctx.kf
-    data = list(block.data)
-    if "TITLE" in block.name.split("_"):
-        data = data[1:]
+    data = _strip_title(block, list(block.data))
     if len(data) > 1:
         lcss = _numint(kf, data[1], STD8, block.long, 2)
         lcsr = _numint(kf, data[1], STD8, block.long, 3)
@@ -367,13 +421,25 @@ def h_mat_024(block: Block, ctx, edit: bool) -> None:
             ctx.register_curve(lcsr, RATE, DIMLESS, "MAT_024 LCSR")
 
 
+def x_mat_015(block: Block, ctx) -> None:
+    """Edit-time check: JC card 4 rate parameter is RATEOP-dependent."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 4:
+        return
+    rateop = kf.get_number(data[0], STD8, block.long, 7)
+    p2 = kf.get_number(data[3], STD8, block.long, 1)
+    if rateop and int(rateop) in (1, 3, 4, 5) and p2:
+        ctx.warn(f"*{block.name}: Card 4 rate parameter C2/P/XNP={p2} left "
+                 f"unscaled - its units depend on RATEOP={int(rateop)} "
+                 "(1/time for Cowper-Symonds P) - verify and scale manually.")
+
+
 def h_section_beam(block: Block, ctx, edit: bool) -> None:
     if not edit:
         return
     kf = ctx.kf
-    data = list(block.data)
-    if "TITLE" in block.name.split("_"):
-        data = data[1:]
+    data = _strip_title(block, list(block.data))
     if not data:
         return
     kf.scale_field(data[0], STD8, block.long, 6, ctx.fac(MASS_LEN))  # NSM
@@ -395,18 +461,183 @@ def h_section_beam(block: Block, ctx, edit: bool) -> None:
     ctx.count("SECTION_BEAM")
 
 
-def h_lagrange_in_solid(block: Block, ctx, edit: bool) -> None:
+def h_section_discrete(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.41-36: pairs of (SECID DRO KD V0 CL FD) / (CDL TDL).
+    For DRO=1 (torsional) the deflections are radians (dimensionless)."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    for i in range(0, len(data) - len(data) % 2, 2):
+        c1, c2 = data[i], data[i + 1]
+        secid = _numint(kf, c1, STD8, block.long, 0)
+        dro = _numint(kf, c1, STD8, block.long, 1) or 0
+        if not edit:
+            ctx.sec_discrete_dro[secid] = dro
+            continue
+        if dro == 0:
+            kf.scale_field(c1, STD8, block.long, 3, ctx.fac(VELOCITY))  # V0
+            for fi in (4, 5):                                           # CL FD
+                kf.scale_field(c1, STD8, block.long, fi, ctx.fac(LENGTH))
+            for fi in (0, 1):                                           # CDL TDL
+                kf.scale_field(c2, STD8, block.long, fi, ctx.fac(LENGTH))
+        else:
+            kf.scale_field(c1, STD8, block.long, 3, ctx.fac(ANG_VEL))   # V0
+    if edit:
+        ctx.count("SECTION_DISCRETE")
+
+
+def _smat_torsional(kf, block, ctx) -> bool:
+    data = _strip_title(block, list(block.data))
+    mid = _numint(kf, data[0], STD8, block.long, 0) if data else None
+    return mid in ctx.torsional_mats
+
+
+def h_smat_spring_elastic(block: Block, ctx, edit: bool) -> None:
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    if not edit:
+        ctx.smat_blocks.append((kf, block, "S01"))
+        return
+    dim = MOMENT if _smat_torsional(kf, block, ctx) else STIFF
+    kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(dim))
+    ctx.count(block.name)
+
+
+def h_smat_spring_elastoplastic(block: Block, ctx, edit: bool) -> None:
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    if not edit:
+        ctx.smat_blocks.append((kf, block, "S03"))
+        return
+    tors = _smat_torsional(kf, block, ctx)
+    kdim = MOMENT if tors else STIFF
+    fdim = MOMENT if tors else FORCE
+    kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(kdim))  # K
+    kf.scale_field(data[0], STD8, block.long, 2, ctx.fac(kdim))  # KT
+    kf.scale_field(data[0], STD8, block.long, 3, ctx.fac(fdim))  # FY
+    ctx.count(block.name)
+
+
+def h_smat_damper_viscous(block: Block, ctx, edit: bool) -> None:
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    if not edit:
+        ctx.smat_blocks.append((kf, block, "S02"))
+        return
+    dim = ROT_DAMP if _smat_torsional(kf, block, ctx) else DAMP
+    kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(dim))
+    ctx.count(block.name)
+
+
+def h_smat_curve_mats(block: Block, ctx, edit: bool) -> None:
+    """S04 (MID LCD LCR) / S05 (MID LCDR): curves carry the physics; their
+    dims depend on translational vs torsional, resolved post-scan."""
+    if not edit:
+        kind = "S05" if "DAMPER" in block.name else "S04"
+        ctx.smat_blocks.append((ctx.kf, block, kind))
+        return
+    ctx.count(block.name + " (curve-carried)")
+
+
+def h_rigidwall_planar(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.40-17. Repeating sets:
+    [ID] Card1 Card2 [ORTHO c3 c4] [FINITE c5] [MOVING c6] [FORCES c7]."""
+    if not edit:
+        return
+    kf = ctx.kf
+    opts = set(block.name.split("_"))
+    seq: List[Dict[int, Dim]] = []
+    if "ID" in opts:
+        seq.append({})
+    seq.append({3: LENGTH, 4: TIME, 5: TIME})                     # card 1
+    seq.append({0: LENGTH, 1: LENGTH, 2: LENGTH, 3: LENGTH,
+                4: LENGTH, 5: LENGTH, 7: VELOCITY})               # card 2
+    if "ORTHO" in opts:
+        seq.append({4: DC_FRIC, 5: DC_FRIC})                      # card 3
+        seq.append({})                                            # card 4
+    if "FINITE" in opts:
+        seq.append({0: LENGTH, 1: LENGTH, 2: LENGTH, 3: LENGTH,
+                    4: LENGTH})                                   # card 5
+    if "MOVING" in opts:
+        seq.append({0: MASS, 1: VELOCITY})                        # card 6
+    if "FORCES" in opts:
+        seq.append({})                                            # card 7
+    data = list(block.data)
+    if len(data) % len(seq):
+        ctx.warn(f"*{block.name}: {len(data)} data cards is not a multiple "
+                 f"of the expected set size {len(seq)} - trailing cards "
+                 "left unscaled, verify the option combination.")
+    for base in range(0, len(data) - len(data) % len(seq), len(seq)):
+        for ci, dims in enumerate(seq):
+            for fi, dim in dims.items():
+                kf.scale_field(data[base + ci], STD8, block.long, fi,
+                               ctx.fac(dim))
+    ctx.count(block.name)
+
+
+def h_initial_stress_shell(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.28-95, LARGE=0 layout only."""
+    if not edit:
+        return
     kf = ctx.kf
     data = list(block.data)
-    if "ID" in block.name.split("_") or "TITLE" in block.name.split("_"):
-        data = data[1:]
+    i = 0
+    while i < len(data):
+        c1 = data[i]
+        nplane = _numint(kf, c1, STD8, block.long, 1) or 0
+        nthick = _numint(kf, c1, STD8, block.long, 2) or 0
+        flags = [(_numint(kf, c1, STD8, block.long, fi) or 0)
+                 for fi in (3, 4, 5, 6, 7)]      # NHISV NTENSR LARGE NTHINT NTHHSV
+        if any(flags):
+            ctx.error(f"*{block.name}: NHISV/NTENSR/LARGE/NTHINT/NTHHSV != 0 "
+                      "layouts are not modelled (history-variable units are "
+                      "material-dependent) - convert manually.")
+            return
+        npts = max(nplane * nthick, 0)
+        for li in data[i + 1: i + 1 + npts]:
+            for fi in range(1, 7):               # SIGXX..SIGZX (T, EPS stay)
+                kf.scale_field(li, STD8, block.long, fi, ctx.fac(PRESSURE))
+        i += 1 + npts
+    ctx.count(block.name)
+
+
+def h_initial_stress_solid(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.28-103, LARGE=0 layout only."""
+    if not edit:
+        return
+    kf = ctx.kf
+    data = list(block.data)
+    i = 0
+    while i < len(data):
+        c1 = data[i]
+        nint = _numint(kf, c1, STD8, block.long, 1) or 0
+        flags = [(_numint(kf, c1, STD8, block.long, fi) or 0)
+                 for fi in (2, 3, 4, 6, 7)]      # NHISV LARGE IVEFLG NTHINT NTHHSV
+        if any(flags):
+            ctx.error(f"*{block.name}: NHISV/LARGE/IVEFLG/NTHINT/NTHHSV != 0 "
+                      "layouts are not modelled - convert manually.")
+            return
+        for li in data[i + 1: i + 1 + nint]:
+            for fi in range(6):                  # SIGXX..SIGZX (EPS stays)
+                kf.scale_field(li, STD8, block.long, fi, ctx.fac(PRESSURE))
+        i += 1 + nint
+    ctx.count(block.name)
+
+
+def h_lagrange_in_solid(block: Block, ctx, edit: bool) -> None:
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
     if len(data) > 1:
         pfac = kf.get_number(data[1], STD8, block.long, 2)
         if pfac is not None and pfac < 0:
             lcid = int(-pfac)
             if not edit:
-                ctx.register_curve(lcid, LENGTH, PRESSURE,
-                                   "CLIS PFAC curve")
+                ctx.register_curve(lcid, LENGTH, PRESSURE, "CLIS PFAC curve")
     if edit:
         if len(data) > 1:
             kf.scale_field(data[1], STD8, block.long, 0, ctx.fac(TIME))
@@ -432,9 +663,9 @@ def h_blast(block: Block, ctx, edit: bool) -> None:
     while i < len(data):
         li1 = data[i]
         if legacy:
-            m_f, coord_f, tbo_f, unit_f, extra = 0, (1, 2, 3), 4, 5, None
+            m_f, coord_f, tbo_f, unit_f = 0, (1, 2, 3), 4, 5
         else:
-            m_f, coord_f, tbo_f, unit_f, extra = 1, (2, 3, 4), 5, 6, 7
+            m_f, coord_f, tbo_f, unit_f = 1, (2, 3, 4), 5, 6
         unit = _numint(kf, li1, STD8, block.long, unit_f) or 2
         blast_type = (_numint(kf, li1, STD8, block.long, 7) or 2) if not legacy else 0
         if not edit:
@@ -509,6 +740,18 @@ def h_cnrb_inertia(block: Block, ctx, edit: bool) -> None:
     ctx.count("CONSTRAINED_NODAL_RIGID_BODY_INERTIA")
 
 
+def x_scan_part(block: Block, ctx) -> None:
+    """Collect (pid, secid, mid) so DRO can classify discrete materials."""
+    kf = ctx.kf
+    data = list(block.data)
+    for i in range(1, len(data), 2):     # heading, ids, heading, ids ...
+        pid = _numint(kf, data[i], STD8, block.long, 0)
+        secid = _numint(kf, data[i], STD8, block.long, 1)
+        mid = _numint(kf, data[i], STD8, block.long, 2)
+        if pid:
+            ctx.part_links.append((pid, secid, mid))
+
+
 CUSTOM: Dict[str, Callable] = {
     "DEFINE_CURVE": h_define_curve,
     "DEFINE_TABLE": h_define_table,
@@ -518,8 +761,18 @@ CUSTOM: Dict[str, Callable] = {
     "LOAD_NODE_SET": h_load_node_or_rb,
     "LOAD_RIGID_BODY": h_load_node_or_rb,
     "SECTION_BEAM": h_section_beam,
+    "SECTION_DISCRETE": h_section_discrete,
+    "MAT_SPRING_ELASTIC": h_smat_spring_elastic,
+    "MAT_SPRING_ELASTOPLASTIC": h_smat_spring_elastoplastic,
+    "MAT_DAMPER_VISCOUS": h_smat_damper_viscous,
+    "MAT_SPRING_NONLINEAR_ELASTIC": h_smat_curve_mats,
+    "MAT_DAMPER_NONLINEAR_VISCOUS": h_smat_curve_mats,
     "CONSTRAINED_LAGRANGE_IN_SOLID": h_lagrange_in_solid,
     "CONSTRAINED_NODAL_RIGID_BODY_INERTIA": h_cnrb_inertia,
+    "INITIAL_STRESS_SHELL": h_initial_stress_shell,
+    "INITIAL_STRESS_SHELL_SET": h_initial_stress_shell,
+    "INITIAL_STRESS_SOLID": h_initial_stress_solid,
+    "INITIAL_STRESS_SOLID_SET": h_initial_stress_solid,
 }
 
 
@@ -527,7 +780,6 @@ def resolve(name: str):
     """Classify a keyword. Returns (kind, payload):
     kind in {spec, custom, white, soft, hard, unknown}."""
     base = name
-    # strip trailing option tokens that only add a heading line
     for opt in ("_TITLE", "_ID"):
         if base.endswith(opt):
             base = base[: -len(opt)]
@@ -547,8 +799,11 @@ def resolve(name: str):
         return "custom", h_load_body
     if name.startswith("BOUNDARY_PRESCRIBED_MOTION"):
         return "custom", h_prescribed_motion
+    if name.startswith("RIGIDWALL_PLANAR"):
+        return "custom", h_rigidwall_planar
     if name.startswith("CONTACT_"):
-        if "TIEBREAK" in name or "DRAWBEAD" in name or "MPP" in name:
+        if (name.startswith("CONTACT_TIEBREAK") or "DRAWBEAD" in name
+                or "MPP" in name or "DAMPING" in name or "MORTAR" in name):
             return "unknown", None
         return "custom", h_contact
     if name.startswith("DATABASE_BINARY_"):
@@ -564,7 +819,12 @@ def resolve(name: str):
     return "unknown", None
 
 
-# extra registration hook: MAT_024 needs a scan even though it has a Spec
+# scan-time extras for keywords that already have a Spec
 SCAN_EXTRA: Dict[str, Callable] = {
     "MAT_PIECEWISE_LINEAR_PLASTICITY": h_mat_024,
+    "PART": x_scan_part,
+}
+# edit-time extras (warnings that need field values)
+EDIT_EXTRA: Dict[str, Callable] = {
+    "MAT_JOHNSON_COOK": x_mat_015,
 }

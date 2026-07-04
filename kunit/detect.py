@@ -8,17 +8,17 @@ Evidence, strongest first:
   5. header comments ('Unit system : m, kg, sec, Pa')
 Each candidate system gets a score; the ranked table plus the winning system
 are returned. Ambiguity (top two closer than 20%) -> caller should demand an
-explicit --from.
+explicit --from. Includes are followed (tolerantly) so evidence in child
+files counts.
 """
 from __future__ import annotations
 
-import math
 import re
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from .convert import scan
-from .parser import KFile, STD8, parse_number
+from .convert import load_tree, scan
+from .parser import STD8, parse_number
 from .units import PRESETS, UnitSystem, parse_system
 
 _DENSITY_ANCHORS = [7850.0, 7800.0, 7830.0, 8900.0, 2700.0, 4500.0,
@@ -53,48 +53,49 @@ def _log_band(value: float, lo: float, hi: float) -> bool:
     return lo <= value <= hi
 
 
-def detect(path: str) -> Verdict:
-    kf = KFile(path)
-    ctx = scan(kf, None)
+def detect(path: str, follow_includes: bool = True) -> Verdict:
+    files, _inc = load_tree(path, follow_includes, strict=False)
+    ctx = scan(files, None, {"follow_includes": follow_includes})
     evidence: List[str] = []
 
-    # collect probe values via the schema probes
+    # probe values declared by the schema (density / modulus / det velocity)
     ros: List[float] = []
     es: List[float] = []
     dets: List[float] = []
-    from .schema import SPECS, resolve
-    for block in kf.blocks:
-        kind, payload = resolve(block.name)
-        if kind != "spec" or not payload.probe:
-            continue
-        data = list(block.data)
-        opts = block.name.split("_")
-        if "TITLE" in opts or "ID" in opts:
-            data = data[1:]
-        for key, (ci, fi) in payload.probe.items():
-            if ci < len(data):
-                v = kf.get_number(data[ci], STD8, block.long, fi)
-                if v:
-                    {"ro": ros, "e": es, "d": dets}[key].append(float(v))
+    from .schema import resolve
+    for kf in files:
+        for block in kf.blocks:
+            kind, payload = resolve(block.name)
+            if kind != "spec" or not payload.probe:
+                continue
+            data = list(block.data)
+            opts = block.name.split("_")
+            if "TITLE" in opts or "ID" in opts:
+                data = data[1:]
+            for key, (ci, fi) in payload.probe.items():
+                if ci < len(data):
+                    v = kf.get_number(data[ci], STD8, block.long, fi)
+                    if v:
+                        {"ro": ros, "e": es, "d": dets}[key].append(float(v))
 
     # gravity ordinates from *LOAD_BODY curves
     gravities: List[float] = []
     for lcid in ctx.probes["gravity_lcids"]:
-        for cb in ctx.curve_blocks.get(lcid, []):
+        for ckf, cb in ctx.curve_blocks.get(lcid, []):
             data = list(cb.data)
             if "TITLE" in cb.name.split("_"):
                 data = data[1:]
             ords = []
             for li in data[1:]:
-                v = kf.get_number(li, (20, 20), cb.long, 1)
+                v = ckf.get_number(li, (20, 20), cb.long, 1)
                 if v:
                     ords.append(abs(float(v)))
             if ords and max(ords) > 0 and min(ords) / max(ords) > 0.99:
                 gravities.append(max(ords))
 
-    # header comment declaration
+    # header comment declaration (main file only)
     header_sys: Optional[UnitSystem] = None
-    for ln in kf.lines[:80]:
+    for ln in files[0].lines[:80]:
         if ln.lstrip().startswith("$") and _HEADER_RE.search(ln):
             toks = [t.lower() for t in _TOKEN_RE.findall(ln)]
             m = next((t for t in toks if t in ("kg", "g", "ton", "tonne", "mg",
@@ -154,6 +155,9 @@ def detect(path: str) -> Verdict:
         evidence.append(f"detonation velocity {d:g}")
     for g in gravities[:2]:
         evidence.append(f"gravity-curve ordinate {g:g}")
+    if len(files) > 1:
+        evidence.append(f"evidence gathered across {len(files)} files "
+                        "(includes followed)")
 
     best_s, best = ranked[0]
     second_s = ranked[1][0] if len(ranked) > 1 else 0.0

@@ -1,0 +1,3 @@
+[console_scripts]
+kunit = kunit.cli:main
+kunit-gui = kunit.gui:main
