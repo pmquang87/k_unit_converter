@@ -1,6 +1,0 @@
-Metadata-Version: 2.4
-Name: kunit
-Version: 0.2.0
-Summary: LS-DYNA .k deck unit-system converter with auto-detection
-License: MIT
-Requires-Python: >=3.9
