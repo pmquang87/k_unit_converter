@@ -24,10 +24,16 @@ def parse_number(token: str) -> Optional[Decimal]:
     m = _ELESS.match(t)
     if m:
         t = m.group(1) + "E" + m.group(2)
+    elif "D" in t or "d" in t:
+        # Fortran double exponents (1.0D+5) - written by some exporters
+        # and accepted by LS-DYNA
+        t = t.replace("D", "E").replace("d", "e")
     try:
-        return Decimal(t)
+        v = Decimal(t)
     except InvalidOperation:
         return None
+    # Decimal accepts 'nan'/'inf' - never treat those as field values
+    return v if v.is_finite() else None
 
 
 def format_fixed(value: Decimal, width: int, pad_right: int = 0):
@@ -101,8 +107,16 @@ class KFile:
                         global_long = True
                 cur = Block(name=name, kwline=i, long=long)
                 blocks.append(cur)
-            elif cur is not None and ln.strip() and not ln.lstrip().startswith("$"):
+            elif cur is not None and not ln.lstrip().startswith("$"):
+                # blank lines ARE data cards in LS-DYNA (all fields default,
+                # commonly used to skip an optional card); dropping them
+                # would shift every later card onto the wrong dimension map
                 cur.data.append(i)
+        for b in blocks:
+            # cosmetic trailing blanks (incl. the empty final line a
+            # trailing newline produces) are not cards
+            while b.data and not self.lines[b.data[-1]].strip():
+                b.data.pop()
         return blocks
 
     # ── field access ────────────────────────────────────────────────────────
@@ -144,11 +158,15 @@ class KFile:
             return
         if long:
             widths = [20] * len(widths)
+        tv = text_value.rjust(widths[fi])
+        if len(tv) > widths[fi]:
+            raise ValueError(f"value {text_value!r} does not fit the "
+                             f"{widths[fi]}-char field {fi}")
         start = sum(widths[:fi])
         end = start + widths[fi]
         if len(line) < end:
             line = line.ljust(end)
-        self.lines[line_idx] = line[:start] + text_value.rjust(widths[fi])[:widths[fi]] + line[end:]
+        self.lines[line_idx] = line[:start] + tv + line[end:]
 
     def scale_field(self, line_idx: int, widths: Sequence[int], long: bool,
                     fi: int, f, pad_right: int = 0) -> bool:

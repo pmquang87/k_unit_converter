@@ -1,6 +1,7 @@
 """kunit command line interface.
 
-  kunit detect  deck.k
+  kunit detect  deck.k [--json]
+  kunit check   deck.k [--follow-includes] [--json]
   kunit convert deck.k --to ton-mm-s [--from kg-m-s] [-o out.k]
   kunit convert deck.k --to ton-mm-s --in-place --follow-includes
   kunit systems
@@ -9,12 +10,13 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
-from .convert import ConvertError, convert, report
+from .convert import ConvertError, convert, inventory, load_tree, report, scan
 from .detect import detect
-from .units import PRESETS, parse_dim_name, parse_system
+from .units import DIM_NAMES, PRESETS, parse_dim_name, parse_system
 
 
 def cmd_systems(_args) -> int:
@@ -26,6 +28,15 @@ def cmd_systems(_args) -> int:
 
 def cmd_detect(args) -> int:
     v = detect(args.deck, follow_includes=not args.no_includes)
+    if args.json:
+        print(json.dumps({
+            "deck": args.deck,
+            "system": v.system.key if v.system else None,
+            "ambiguous": v.ambiguous,
+            "scores": [{"system": s.key, "score": sc} for sc, s in v.ranked],
+            "evidence": v.evidence,
+        }, indent=2))
+        return 2 if v.system is None else (1 if v.ambiguous else 0)
     print(v.table())
     if v.evidence:
         print("\nevidence:")
@@ -37,6 +48,99 @@ def cmd_detect(args) -> int:
     print(f"\ndetected: {v.system.describe()}"
           + ("   [AMBIGUOUS - verify!]" if v.ambiguous else ""))
     return 1 if v.ambiguous else 0
+
+
+def _dim_label(dim) -> str:
+    return DIM_NAMES.get(dim, str(dim))
+
+
+def cmd_check(args) -> int:
+    """Coverage / convertibility report: classify every keyword and every
+    *DEFINE_CURVE without touching the deck."""
+    try:
+        files, _inc = load_tree(args.deck, args.follow_includes)
+    except ConvertError as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    ctx = scan(files, None, {"follow_includes": args.follow_includes})
+    inv = inventory(files, follow_includes=args.follow_includes)
+
+    kinds = {"spec": [], "custom": [], "white": [], "soft": [], "hard": [],
+             "unknown": []}
+    for name, (kind, n) in sorted(inv.items()):
+        kinds[kind].append((name, n))
+
+    curves = {}
+    for lcid in sorted(k for k in set(ctx.curve_blocks) | set(ctx.curve_dims)
+                       if k is not None):
+        dims = ctx.curve_dims.get(lcid, {})
+        demands = [{"x": _dim_label(xd), "y": _dim_label(yd), "by": src}
+                   for (xd, yd), src in sorted(dims.items(), key=str)]
+        status = ("unresolved" if not dims
+                  else "conflict" if len(dims) > 1 else "resolved")
+        curves[lcid] = {"defined": lcid in ctx.curve_blocks,
+                        "status": status, "demands": demands}
+
+    hard = {k: v for k, v in ctx.hard.items()}
+    unknown = dict(ctx.unknown)
+    convertible = not hard and not unknown
+    rc = 1 if hard else (2 if unknown else 0)
+
+    if args.json:
+        print(json.dumps({
+            "deck": args.deck,
+            "files": [kf.path for kf in files],
+            "keywords": {name: {"kind": kind, "count": n}
+                         for name, (kind, n) in sorted(inv.items())},
+            "hard": hard,
+            "soft": dict(ctx.soft),
+            "unknown": unknown,
+            "curves": {str(k): v for k, v in curves.items()},
+            "warnings": ctx.warnings,
+            "convertible": convertible,
+        }, indent=2))
+        return rc
+
+    print(f"deck: {args.deck}" + (f"  ({len(files)} files, includes followed)"
+                                  if len(files) > 1 else ""))
+    label = {"spec": "scalable (dimension table)",
+             "custom": "scalable (custom handler)",
+             "white": "dimensionless (whitelist)",
+             "soft": "left unchanged (assumed dimensionless - verify)",
+             "hard": "HARD STOPS (conversion refused)",
+             "unknown": "UNKNOWN (refused unless --allow-unknown)"}
+    for kind in ("spec", "custom", "white", "soft", "hard", "unknown"):
+        if not kinds[kind]:
+            continue
+        print(f"\n{label[kind]}:")
+        for name, n in kinds[kind]:
+            why = (ctx.hard.get(name) if kind == "hard"
+                   else ctx.soft.get(name) if kind == "soft" else None)
+            print(f"  *{name:<42} x{n}" + (f"   ({why})" if why else ""))
+    if curves:
+        print("\ncurves (*DEFINE_CURVE):")
+        for lcid, c in curves.items():
+            if c["status"] == "resolved":
+                d = c["demands"][0]
+                print(f"  lcid {lcid:<6} {d['x']} vs {d['y']}   [{d['by']}]")
+            elif c["status"] == "conflict":
+                wants = "; ".join(f"{d['x']}:{d['y']} ({d['by']})"
+                                  for d in c["demands"])
+                print(f"  lcid {lcid:<6} CONFLICT - {wants}")
+            else:
+                where = ("" if c["defined"]
+                         else " (referenced but not defined here)")
+                print(f"  lcid {lcid:<6} UNRESOLVED - no referencing keyword "
+                      f"declares its dimensions{where}; use "
+                      f"--curve {lcid}=<xdim>:<ydim> when converting")
+    for w in ctx.warnings:
+        print(f"\nwarning: {w}")
+    print("\nverdict: " + (
+        "convertible - every keyword is classified" if convertible
+        else "NOT convertible - hard stops present" if hard
+        else "needs --allow-unknown (or a schema extension) - unknown "
+             "keywords present"))
+    return rc
 
 
 def parse_curve_overrides(specs):
@@ -70,6 +174,10 @@ def cmd_convert(args) -> int:
         return 0
 
     deck = Path(args.deck)
+    if args.in_place and args.output:
+        print("ERROR: --in-place and -o/--output are mutually exclusive.",
+              file=sys.stderr)
+        return 2
     if args.in_place:
         out = deck
     else:
@@ -117,7 +225,18 @@ def main(argv=None) -> int:
     p.add_argument("deck")
     p.add_argument("--no-includes", action="store_true",
                    help="do not follow *INCLUDE files for evidence")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable JSON verdict on stdout")
     p.set_defaults(fn=cmd_detect)
+
+    p = sub.add_parser("check", help="report keyword coverage / convertibility "
+                                     "without converting")
+    p.add_argument("deck")
+    p.add_argument("--follow-includes", action="store_true",
+                   help="check the whole *INCLUDE tree")
+    p.add_argument("--json", action="store_true",
+                   help="machine-readable JSON report on stdout")
+    p.set_defaults(fn=cmd_check)
 
     p = sub.add_parser("convert", help="convert a deck between unit systems")
     p.add_argument("deck")

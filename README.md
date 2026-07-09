@@ -13,6 +13,9 @@ pip install -e .            # gives the `kunit` and `kunit-gui` commands
 
 kunit systems                            # list presets
 kunit detect  deck.k                     # what units is this deck in?
+kunit detect  deck.k --json              # machine-readable verdict (CI-friendly)
+kunit check   deck.k                     # coverage report: convertible as-is?
+kunit check   deck.k --follow-includes --json
 kunit convert deck.k --to ton-mm-s       # auto-detect source, write deck__ton-mm-s.k
 kunit convert deck.k --to g-mm-ms --from kg-m-s -o out.k
 kunit convert deck.k --to ton-mm-s --in-place          # keeps .orig_<from> backups
@@ -42,7 +45,10 @@ kunit gui                                # or kunit-gui
   curves-following-the-table form), plus a safety inventory. Pass 2 rewrites
   fields in place respecting true column layouts (`*NODE` I8+3E16,
   `*ELEMENT_MASS` I8,I8,F16,I8, curve data 2E20, long format ×20), comma
-  free-format lines, and E-less Fortran exponents (`7.85000-9`).
+  free-format lines, E-less Fortran exponents (`7.85000-9`) and Fortran
+  double exponents (`1.0D+5`). Blank lines inside a keyword block are
+  treated as what they are in LS-DYNA — all-default data cards — so
+  optional-card skipping never shifts later cards onto the wrong field map.
 * **Safety net:** every keyword in the deck must be classified — scalable
   (schema/custom handler), dimensionless whitelist, or known-unsupported.
   Anything unknown **aborts** the conversion (override: `--allow-unknown`,
@@ -57,11 +63,22 @@ kunit gui                                # or kunit-gui
   gathering evidence across the whole include tree. Ambiguous verdicts refuse
   to convert without an explicit `--from`.
 
+## Checking a deck without converting
+
+`kunit check deck.k` classifies every keyword (scalable / dimensionless /
+left-unchanged / hard-stop / unknown), reports how each `*DEFINE_CURVE`'s
+axis dimensions were resolved (and which curves need a `--curve` override),
+and gives a verdict: exit 0 = convertible, 1 = hard stops, 2 = unknown
+keywords. `--json` (also on `kunit detect`) emits the same report as JSON
+for CI pipelines.
+
 ## Verification built in
 
 * **Self-check** (default on): after writing, the output is re-detected and
   must score as the *target* system — a missed dimensional field (schema gap)
-  shows up immediately as `SELF-CHECK FAILED`.
+  shows up immediately as `SELF-CHECK FAILED`. The re-detection ignores
+  header comments (including kunit's own conversion stamp), so the check is
+  driven by physical evidence only and cannot confirm its own claim.
 * **`--verify-roundtrip`**: converts the output back to the source system and
   forward again; the two forward results must agree byte-for-byte (comments
   ignored), proving formatting lost no precision.
