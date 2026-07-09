@@ -71,7 +71,8 @@ def cmd_check(args) -> int:
         kinds[kind].append((name, n))
 
     curves = {}
-    for lcid in sorted(set(ctx.curve_blocks) | set(ctx.curve_dims)):
+    for lcid in sorted(k for k in set(ctx.curve_blocks) | set(ctx.curve_dims)
+                       if k is not None):
         dims = ctx.curve_dims.get(lcid, {})
         demands = [{"x": _dim_label(xd), "y": _dim_label(yd), "by": src}
                    for (xd, yd), src in sorted(dims.items(), key=str)]
@@ -173,6 +174,10 @@ def cmd_convert(args) -> int:
         return 0
 
     deck = Path(args.deck)
+    if args.in_place and args.output:
+        print("ERROR: --in-place and -o/--output are mutually exclusive.",
+              file=sys.stderr)
+        return 2
     if args.in_place:
         out = deck
     else:

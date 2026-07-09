@@ -63,7 +63,13 @@ def _log_band(value: float, lo: float, hi: float) -> bool:
     return lo <= value <= hi
 
 
-def detect(path: str, follow_includes: bool = True) -> Verdict:
+def detect(path: str, follow_includes: bool = True,
+           use_headers: bool = True) -> Verdict:
+    """Score all preset systems against the deck's evidence.
+
+    use_headers=False ignores unit-declaration comments (including the
+    stamp kunit itself writes) and scores physical evidence only - used by
+    convert()'s self-check, which must not confirm its own header."""
     files, _inc = load_tree(path, follow_includes, strict=False)
     ctx = scan(files, None, {"follow_includes": follow_includes})
     evidence: List[str] = []
@@ -97,7 +103,8 @@ def detect(path: str, follow_includes: bool = True) -> Verdict:
     for lcid in ctx.probes["gravity_lcids"]:
         for ckf, cb in ctx.curve_blocks.get(lcid, []):
             data = list(cb.data)
-            if "TITLE" in cb.name.split("_"):
+            opts = cb.name.split("_")
+            if "TITLE" in opts or "ID" in opts:
                 data = data[1:]
             ords = []
             for li in data[1:]:
@@ -109,21 +116,26 @@ def detect(path: str, follow_includes: bool = True) -> Verdict:
     # *LOAD_GRAVITY_PART ACCEL values are accelerations near g directly
     gravities.extend(ctx.probes.get("gravity_accels", []))
 
-    # header comment declaration (main file only)
+    # header comment declaration (main file only). A kunit conversion stamp
+    # always beats a generic 'Unit system :' comment - after an in-place
+    # conversion the original (now stale) declaration survives above the
+    # stamp. Unparseable header lines don't stop the scan.
     header_sys: Optional[UnitSystem] = None
-    for ln in files[0].lines[:80]:
+    stamp_sys: Optional[UnitSystem] = None
+    generic_sys: Optional[UnitSystem] = None
+    for ln in (files[0].lines[:80] if use_headers else []):
         if not ln.lstrip().startswith("$"):
             continue
         km = _KUNIT_HDR_RE.search(ln)
         if km:
             try:
-                header_sys = parse_system(km.group(1))
-                evidence.append(f"kunit header declares {header_sys.key}: "
+                stamp_sys = parse_system(km.group(1))
+                evidence.append(f"kunit header declares {stamp_sys.key}: "
                                 f"{ln.strip()!r}")
+                break
             except ValueError:
-                pass
-            break
-        if _HEADER_RE.search(ln):
+                continue
+        if generic_sys is None and _HEADER_RE.search(ln):
             toks = [t.lower() for t in _TOKEN_RE.findall(ln)]
             m = next((t for t in toks if t in ("kg", "g", "ton", "tonne", "mg",
                                                "lbm", "lb", "slug", "slinch")), None)
@@ -132,12 +144,12 @@ def detect(path: str, follow_includes: bool = True) -> Verdict:
             t = next((t for t in toks if t in ("s", "sec", "ms", "us", "µs")), None)
             if m and l and t:
                 try:
-                    header_sys = parse_system(f"{m}-{l}-{t}")
-                    evidence.append(f"header comment declares {header_sys.key}: "
-                                    f"{ln.strip()!r}")
+                    generic_sys = parse_system(f"{m}-{l}-{t}")
                 except ValueError:
                     pass
-            break
+    header_sys = stamp_sys or generic_sys
+    if header_sys is not None and stamp_sys is None:
+        evidence.append(f"header comment declares {header_sys.key}")
 
     ranked: List[Tuple[float, UnitSystem]] = []
     for sys in PRESETS.values():

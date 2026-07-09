@@ -803,6 +803,173 @@ class NewFeatureTests(unittest.TestCase):
         import kunit.gui  # noqa: F401  (no Tk instantiation)
 
 
+MM = parse_system("kg-mm-ms")
+
+
+class BugFixTests(unittest.TestCase):
+    """Regression tests for the 2026-07 bug-hunt."""
+
+    def test_blank_lines_are_data_cards(self):
+        # a blank line is a valid all-defaults card; dropping it used to
+        # shift later cards onto the wrong dimension map
+        deck = ("*KEYWORD\n*INITIAL_VELOCITY\n\n"      # blank NSID card
+                + F(10.0, 20.0, 30.0, 0.0, 0.0, 0.0) + "\n*END\n")
+        p = _write(deck)
+        convert(p, SI, TON, p + ".o.k", self_check=False)
+        li = _lines(p + ".o.k")
+        vals = li[li.index("*INITIAL_VELOCITY") + 2]
+        self.assertAlmostEqual(float(vals[0:10]), 10000.0)  # scaled as vel
+
+    def test_blank_card_in_contact(self):
+        deck = ("*KEYWORD\n*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE\n"
+                + F(1, 2, 3, 3) + "\n\n"               # blank card 2
+                + F(0.0, 0.0, 100.0, 200.0) + "\n*END\n")
+        p = _write(deck)
+        convert(p, SI, TON, p + ".o.k", self_check=False)
+        c3 = _lines(p + ".o.k")[-3]
+        self.assertAlmostEqual(float(c3[20:30]), 100000.0)  # SST m->mm
+        self.assertAlmostEqual(float(c3[30:40]), 200000.0)  # MST
+
+    def test_repeat_cards_register_every_curve(self):
+        # only the first repeated card's LCID used to be registered
+        deck = ("*KEYWORD\n*LOAD_SEGMENT\n"
+                + F(101, 1.0, 0.0, 1, 2, 3, 4) + "\n"
+                + F(102, 1.0, 0.0, 5, 6, 7, 8) + "\n"
+                "*DEFINE_CURVE\n" + F(101) + "\n" + F(0.0, 200000.0, w=20)
+                + "\n*DEFINE_CURVE\n" + F(102) + "\n"
+                + F(0.0, 300000.0, w=20) + "\n*END\n")
+        p = _write(deck)
+        convert(p, SI, MM, p + ".o.k", self_check=False)
+        txt = "\n".join(_lines(p + ".o.k"))
+        self.assertIn("0.0002", txt)                   # curve 101 Pa->GPa
+        self.assertIn("0.0003", txt)                   # curve 102 too
+
+    def test_self_check_is_not_circular(self):
+        # the kunit stamp header must not confirm the conversion's own claim
+        deck = "*KEYWORD\n*MY_WEIRD_MAT\n" + F(1, 7850.0) + "\n*END\n"
+        p = _write(deck)
+        ctx = convert(p, SI, TON, p + ".o.k", allow_unknown=True)
+        self.assertIn("skipped", ctx.self_check)       # was falsely 'OK'
+
+    def test_contact_tiebreak_optional_card_a(self):
+        # tiebreak Card 4 comes BEFORE optional cards A/B; card A's flags
+        # used to be scaled with card B's dims
+        deck = ("*KEYWORD\n*CONTACT_AUTOMATIC_SURFACE_TO_SURFACE_TIEBREAK\n"
+                + F(1, 2, 3, 3) + "\n" + F(0.1, 0.1) + "\n"
+                + F(1.0, 1.0) + "\n"
+                + F(2, "1.0E6", "1.0E6", 0.0, 0.0, 0.0) + "\n"
+                + F(0.0, 0.0, 0, 0.0, 0, 0, 10, 5) + "\n*END\n")
+        p = _write(deck)
+        convert(p, SI, MM, p + ".o.k", self_check=False)
+        a = _lines(p + ".o.k")[-3]                     # card A (before *END)
+        self.assertEqual(int(a[60:70]), 10)            # BSORT stays a count
+        self.assertEqual(int(a[70:80]), 5)             # FRCFRQ too
+
+    def test_cnrb_inertia_title_stripped(self):
+        deck = ("*KEYWORD\n*CONSTRAINED_NODAL_RIGID_BODY_INERTIA_TITLE\n"
+                "my rigid body\n" + F(1, 0, 2) + "\n"
+                + F(1.0, 2.0, 3.0, 10.0, 0) + "\n"
+                + F(100.0, 0.0, 0.0, 100.0, 0.0, 100.0) + "\n"
+                + F(0.0, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n*END\n")
+        p = _write(deck)
+        convert(p, SI, MM, p + ".o.k", self_check=False)
+        li = _lines(p + ".o.k")
+        at = li.index("my rigid body")
+        self.assertEqual(li[at + 1], F(1, 0, 2))       # ids untouched
+        self.assertAlmostEqual(float(li[at + 2][0:10]), 1000.0)   # XC
+        self.assertAlmostEqual(float(li[at + 3][0:10]), 1.0e8)    # IXX
+
+    def test_load_body_generalized_refused(self):
+        deck = ("*KEYWORD\n*LOAD_BODY_GENERALIZED\n"
+                + F(100, 200, 9, 7, 1.0, 2.0, 3.0) + "\n"
+                + F(0.0, 0.0, 9.8, 0.0, 0.0, 0.0) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "unknown keywords"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
+
+    def test_load_body_lciddr_registered(self):
+        deck = ("*KEYWORD\n*LOAD_BODY_Z\n" + F(0, 1.0, 8) + "\n"
+                "*DEFINE_CURVE\n" + F(8) + "\n"
+                + F(0.0, 9.81, w=20) + "\n*END\n")
+        p = _write(deck)
+        convert(p, SI, MM, p + ".o.k", self_check=False)
+        txt = "\n".join(_lines(p + ".o.k"))
+        self.assertIn("0.00981", txt)      # 9.81 m/s^2 -> mm/ms^2 via LCIDDR
+
+    def test_database_id_keywords_not_time_scaled(self):
+        deck = ("*KEYWORD\n*DATABASE_NODAL_FORCE_GROUP\n" + F(3, 0) + "\n"
+                "*DATABASE_GLSTAT\n" + F("2.0E-5", 0, 0, 1) + "\n*END\n")
+        p = _write(deck)
+        convert(p, SI, MM, p + ".o.k", self_check=False)
+        li = _lines(p + ".o.k")
+        self.assertEqual(int(li[li.index("*DATABASE_NODAL_FORCE_GROUP") + 1]
+                             [0:10]), 3)               # NSID untouched
+        self.assertAlmostEqual(
+            float(li[li.index("*DATABASE_GLSTAT") + 1][0:10]), 0.02)
+
+    def test_database_unmodelled_is_unknown(self):
+        deck = "*KEYWORD\n*DATABASE_TRACER\n" + F(0.0, 0, 1.0, 2.0, 3.0) + "\n*END\n"
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "unknown keywords"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
+
+    def test_cross_section_plane_card2(self):
+        deck = ("*KEYWORD\n*DATABASE_CROSS_SECTION_PLANE\n"
+                + F(1, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0) + "\n"
+                + F(0.0, 1.0, 0.0, 2.0, 2.0, 5, 2, 1) + "\n*END\n")
+        p = _write(deck)
+        convert(p, SI, MM, p + ".o.k", self_check=False)
+        c2 = _lines(p + ".o.k")[-3]                    # card 2 (before *END)
+        self.assertAlmostEqual(float(c2[30:40]), 2000.0)  # LENL scaled
+        self.assertEqual(int(c2[50:60]), 5)               # NSID untouched
+        self.assertEqual(int(c2[70:80]), 1)               # ITYPE untouched
+
+    def test_hard_flag_with_title_suffix(self):
+        deck = ("*KEYWORD\n*DEFINE_CURVE_FUNCTION_TITLE\nmy function\n"
+                + F(9) + "\nSIN(TIME)\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "cannot be safely"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
+
+    def test_parameter_field_is_convert_error(self):
+        deck = "*KEYWORD\n*CONTROL_TERMINATION\n" + "        &t" + "\n*END\n"
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "PARAMETER"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
+
+    def test_fortran_double_exponent(self):
+        self.assertEqual(parse_number("1.0D+5"), Decimal("1.0E+5"))
+        self.assertEqual(parse_number("2.5d-3"), Decimal("0.0025"))
+        self.assertIsNone(parse_number("nan"))
+        self.assertIsNone(parse_number("inf"))
+
+    def test_blank_curve_id_refused(self):
+        deck = ("*KEYWORD\n*DEFINE_CURVE\n" + " " * 10 + "\n"
+                + F(0.0, 1.0, w=20) + "\n"
+                "*LOAD_SEGMENT\n" + F(0, 1.0, 0.0, 1, 2, 3, 4) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "blank or unparseable"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
+
+    def test_in_place_backup_collision_writes_nothing(self):
+        import tempfile as tf
+        d = tf.mkdtemp(prefix="kunit_test_")
+        main = _write("*KEYWORD\n*INCLUDE\nchild.k\n*CONTROL_TERMINATION\n"
+                      + F(0.006) + "\n*END\n", "main.k", d)
+        child = _write("*KEYWORD\n*MAT_ELASTIC\n"
+                       + F(1, 7850.0, "2.1E11", 0.3) + "\n*END\n",
+                       "child.k", d)
+        # stale backup for the CHILD only: conversion must abort BEFORE
+        # overwriting main.k (used to leave a half-converted tree)
+        with open(child + ".orig_kg-m-s", "w") as fh:
+            fh.write("stale")
+        before = "\n".join(_lines(main))
+        with self.assertRaisesRegex(ConvertError, "backup"):
+            convert(main, SI, TON, main, follow_includes=True,
+                    self_check=False)
+        self.assertEqual("\n".join(_lines(main)), before)  # untouched
+
+
 class CliTests(unittest.TestCase):
     """`kunit check` / `kunit detect --json` (no files are written)."""
 

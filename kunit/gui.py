@@ -156,32 +156,55 @@ class App:
                 elif kind == "done":
                     self.busy = False
                     self.convert_btn.configure(state="normal")
+                elif kind == "set_from":
+                    self.from_var.set(payload)
+                elif kind == "set_out":
+                    self.out_var.set(payload)
                 elif kind == "error":
                     messagebox.showerror("kunit", payload)
         except queue.Empty:
             pass
         self.root.after(100, self._poll)
 
+    def _snapshot(self) -> dict:
+        """Read every Tk variable on the MAIN thread - tkinter variables
+        are not safe to touch from the worker threads."""
+        return {
+            "deck": self.deck_var.get().strip(),
+            "from": self.from_var.get().strip().lower(),
+            "to": self.to_var.get(),
+            "out": self.out_var.get().strip(),
+            "curves": self.curves_var.get(),
+            "inplace": self.v_inplace.get(),
+            "backup": self.v_backup.get(),
+            "includes": self.v_includes.get(),
+            "dry": self.v_dry.get(),
+            "blast5": self.v_blast5.get(),
+            "unknown": self.v_unknown.get(),
+            "roundtrip": self.v_roundtrip.get(),
+            "selfcheck": self.v_selfcheck.get(),
+        }
+
     def _start(self, target):
         if self.busy:
             return
-        deck = self.deck_var.get().strip()
-        if not deck or not Path(deck).is_file():
+        o = self._snapshot()
+        if not o["deck"] or not Path(o["deck"]).is_file():
             messagebox.showerror("kunit", "Select an existing .k deck first.")
             return
         self.busy = True
         self.convert_btn.configure(state="disabled")
         self._clear()
-        threading.Thread(target=target, args=(deck,), daemon=True).start()
+        threading.Thread(target=target, args=(o,), daemon=True).start()
 
     # ── actions ─────────────────────────────────────────────────────────────
     def on_detect(self):
         self._start(self._detect_worker)
 
-    def _detect_worker(self, deck: str):
+    def _detect_worker(self, o: dict):
         try:
             self.q.put(("status", "detecting..."))
-            v = detect(deck, follow_includes=self.v_includes.get())
+            v = detect(o["deck"], follow_includes=o["includes"])
             self.q.put(("log", v.table()))
             if v.evidence:
                 self.q.put(("log", "\nevidence:"))
@@ -193,7 +216,7 @@ class App:
             else:
                 tag = "  [AMBIGUOUS - verify!]" if v.ambiguous else ""
                 self.q.put(("log", f"\ndetected: {v.system.describe()}{tag}"))
-                self.from_var.set(v.system.key)
+                self.q.put(("set_from", v.system.key))
                 self.q.put(("status", f"detected {v.system.key}"
                             + (" (ambiguous)" if v.ambiguous else "")))
         except Exception as e:
@@ -206,13 +229,13 @@ class App:
     def on_convert(self):
         self._start(self._convert_worker)
 
-    def _convert_worker(self, deck: str):
+    def _convert_worker(self, o: dict):
         try:
             self.q.put(("status", "converting..."))
-            dst = parse_system(self.to_var.get())
-            from_spec = self.from_var.get().strip().lower()
-            if from_spec in ("", "auto"):
-                v = detect(deck, follow_includes=self.v_includes.get())
+            deck = o["deck"]
+            dst = parse_system(o["to"])
+            if o["from"] in ("", "auto"):
+                v = detect(deck, follow_includes=o["includes"])
                 if v.system is None or v.ambiguous:
                     self.q.put(("log", v.table()))
                     self.q.put(("error", "Auto-detection is not confident - "
@@ -222,41 +245,40 @@ class App:
                 src = v.system
                 self.q.put(("log", f"auto-detected source: {src.describe()}\n"))
             else:
-                src = parse_system(from_spec)
+                src = parse_system(o["from"])
             if src == dst:
                 self.q.put(("log", "source == target, nothing to do"))
                 self.q.put(("status", "nothing to do"))
                 return
-            if self.v_inplace.get():
+            if o["inplace"]:
                 out = deck
             else:
-                out = self.out_var.get().strip() or str(
+                out = o["out"] or str(
                     Path(deck).with_name(f"{Path(deck).stem}__{dst.key}"
                                          f"{Path(deck).suffix}"))
-                self.out_var.set(out)
-            overrides = parse_curve_overrides(
-                self.curves_var.get().split() or None)
+                self.q.put(("set_out", out))
+            overrides = parse_curve_overrides(o["curves"].split() or None)
             ctx = convert(deck, src, dst, out,
-                          blast_unit=5 if self.v_blast5.get() else None,
-                          allow_unknown=self.v_unknown.get(),
-                          follow_includes=self.v_includes.get(),
-                          dry_run=self.v_dry.get(),
+                          blast_unit=5 if o["blast5"] else None,
+                          allow_unknown=o["unknown"],
+                          follow_includes=o["includes"],
+                          dry_run=o["dry"],
                           curve_overrides=overrides,
-                          self_check=self.v_selfcheck.get(),
-                          verify_roundtrip=self.v_roundtrip.get(),
-                          backup=self.v_backup.get())
+                          self_check=o["selfcheck"],
+                          verify_roundtrip=o["roundtrip"],
+                          backup=o["backup"])
             txt = report(ctx, src, dst)
-            if self.v_dry.get():
+            if o["dry"]:
                 self.q.put(("log", "DRY RUN - no files written\n"))
             self.q.put(("log", txt))
-            if not self.v_dry.get():
+            if not o["dry"]:
                 log = out + ".kunit.log"
                 with open(log, "w", encoding="utf-8") as fh:
                     fh.write(txt + "\n")
                 self.q.put(("log", f"\nlog: {log}"))
             bad = ctx.self_check and ctx.self_check.startswith("FAILED")
             self.q.put(("status", "self-check FAILED - inspect output!"
-                        if bad else ("dry run complete" if self.v_dry.get()
+                        if bad else ("dry run complete" if o["dry"]
                                      else "converted OK")))
         except (ConvertError, ValueError, SystemExit) as e:
             self.q.put(("log", f"ERROR: {e}"))

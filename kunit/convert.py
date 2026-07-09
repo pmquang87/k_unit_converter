@@ -11,7 +11,7 @@ from collections import Counter
 from fractions import Fraction
 from typing import Dict, List, Optional, Set, Tuple
 
-from .parser import Block, KFile, STD8
+from .parser import Block, KFile, ParameterFieldError, STD8
 from .schema import (CUSTOM, EDIT_EXTRA, SCAN_EXTRA, Spec, _numint,
                      _strip_title, resolve)
 from .units import (ANG_VEL, DIM_NAMES, DIMLESS, Dim, FORCE, LENGTH, MOMENT,
@@ -176,9 +176,18 @@ def _apply_spec(spec: Spec, block: Block, ctx: Ctx, edit: bool) -> None:
         ctx.warn(f"*{block.name}: {len(data) - idx} trailing card(s) beyond "
                  "the modelled layout left unscaled - verify manually.")
     if not edit:
+        ncards = len(spec.cards)
         for (ci, fi, xdim, ydim) in spec.curves:
-            if ci < len(data):
-                v = kf.get_number(data[ci], STD8, block.long, fi)
+            if ci >= len(data):
+                continue
+            if ci >= ncards and spec.repeat is not None:
+                rows = data[ci:]            # one curve ref per repeated card
+            elif ci >= ncards and spec.group:
+                rows = data[ci::len(spec.group)]   # per group repetition
+            else:
+                rows = [data[ci]]
+            for li in rows:
+                v = kf.get_number(li, STD8, block.long, fi)
                 if v:
                     ctx.register_curve(int(v), xdim, ydim, block.name)
     if edit and (spec.cards or spec.repeat or spec.group):
@@ -274,7 +283,10 @@ def _post_scan(ctx: Ctx) -> None:
         bi = kf.blocks.index(tblock)
         got = 0
         for b in kf.blocks[bi + 1:]:
-            if got >= n or not b.name.startswith("DEFINE_CURVE"):
+            # exact match: DEFINE_CURVE_SMOOTH / _FUNCTION are not the
+            # plain sub-curves the table's values-following form expects
+            if got >= n or b.name not in ("DEFINE_CURVE",
+                                          "DEFINE_CURVE_TITLE"):
                 break
             bdata = _strip_title(b, list(b.data))
             if bdata:
@@ -352,7 +364,10 @@ def convert(path: str, src: UnitSystem, dst: UnitSystem, out_path: str,
               "Re-run with --allow-unknown to convert anyway (they will be "
               "left unchanged), or extend kunit/schema.py.")
 
-    _walk(ctx, edit=True)                       # pass 2: rewrite fields
+    try:
+        _walk(ctx, edit=True)                   # pass 2: rewrite fields
+    except ParameterFieldError as e:
+        raise ConvertError(f"{ctx.kf.path}: {e}") from None
     if ctx.errors:
         raise ConvertError("conversion errors:\n  " + "\n  ".join(ctx.errors))
 
@@ -383,6 +398,9 @@ def convert(path: str, src: UnitSystem, dst: UnitSystem, out_path: str,
         return ctx
 
     stamp = datetime.date.today().isoformat()
+    # plan backups first so a collision aborts BEFORE anything is
+    # overwritten - never leave a half-converted include tree behind
+    writes: List[Tuple[KFile, str, Optional[str]]] = []
     for kf in files:
         cp = os.path.normcase(os.path.abspath(kf.path))
         out = plan[cp]
@@ -391,21 +409,29 @@ def convert(path: str, src: UnitSystem, dst: UnitSystem, out_path: str,
             bak = out + f".orig_{src.key}"
             if os.path.exists(bak):
                 raise ConvertError(f"backup {bak} already exists - refusing "
-                                   "to overwrite it (delete or move it first)")
+                                   "to overwrite it (delete or move it "
+                                   "first); no files have been modified")
+        writes.append((kf, out, bak))
+    for kf, out, bak in writes:
+        if bak:
             shutil.copy2(kf.path, bak)
         hdr = None
-        if cp == main_in:
+        if os.path.normcase(os.path.abspath(kf.path)) == main_in:
             hdr = [f"$ kunit: converted from {src.key} to {dst.key} on {stamp}",
                    f"$ kunit: unit system is now  mass={dst.mass}  "
                    f"length={dst.length}  time={dst.time}"]
         kf.write(out, extra_header=hdr)
         ctx.written.append((out, bak))
 
-    # self-check: the output should auto-detect as the target system
+    # self-check: the output should auto-detect as the target system from
+    # PHYSICAL evidence alone - header comments (including the kunit stamp
+    # this very conversion just wrote) are ignored, otherwise the check
+    # would confirm its own claim and could never fail
     if self_check:
         from .detect import detect
         try:
-            v = detect(out_path, follow_includes=follow_includes)
+            v = detect(out_path, follow_includes=follow_includes,
+                       use_headers=False)
             if v.system is None:
                 ctx.self_check = "no evidence in output - self-check skipped"
             elif v.system == dst:

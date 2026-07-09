@@ -235,9 +235,13 @@ SPECS: Dict[str, Spec] = {
     "CONTROL_IMPLICIT_EIGENVALUE": Spec(cards=[C({1: FREQ})], extra_ok=True),
     "DAMPING_GLOBAL": Spec(cards=[C({1: FREQ})], curves=[(0, 0, TIME, FREQ)]),
     "DAMPING_PART_MASS": Spec(repeat=C(), curves=[(0, 1, TIME, FREQ)]),
+    # R16 Vol I p.16-32: Card1 PSID XCT YCT ZCT XCH YCH ZCH RADIUS;
+    # Card2 XHEV YHEV ZHEV LENL LENM NSID ID ITYPE - the edge vector and
+    # the in-plane extents are lengths, NSID/ID/ITYPE are ids/flags
     "DATABASE_CROSS_SECTION_PLANE": Spec(group=[
         C({1: LENGTH, 2: LENGTH, 3: LENGTH, 4: LENGTH, 5: LENGTH, 6: LENGTH,
-           7: LENGTH})]),
+           7: LENGTH}),
+        C({0: LENGTH, 1: LENGTH, 2: LENGTH, 3: LENGTH, 4: LENGTH})]),
     "DATABASE_ALE_OPERATION": Spec(cards=[C(), C({0: TIME}), C()]),
 
     # ── defines ─────────────────────────────────────────────────────────────
@@ -330,11 +334,27 @@ WHITELIST = {
     "ICFD_BOUNDARY_FREESLIP", "ICFD_BOUNDARY_NONSLIP",
     "ICFD_PART", "ICFD_PART_VOL", "ICFD_SECTION",
     "MESH_SURFACE_ELEMENT", "MESH_VOLUME",
+    # DATABASE keywords that carry ids/flags only (no DT field)
+    "DATABASE_NODAL_FORCE_GROUP", "DATABASE_SPRING_FORWARD",
+    "DATABASE_MASSOUT",
 }
 WHITELIST_PREFIXES = (
     "SET_", "BOUNDARY_SPC", "DATABASE_HISTORY", "CONTROL_MPP_",
     "DEFORMABLE_TO_RIGID", "INTERFACE_SPRINGBACK",
+    "DATABASE_EXTENT_",     # output-content flags only
 )
+# ASCII output files whose card 1 is 'DT BINARY LCUR IOOPT' (R16 Vol I
+# *DATABASE_OPTION table) - the only DATABASE_ keywords where field 0 is a
+# time interval
+_DATABASE_ASCII = {
+    "ABSTAT", "ABSTAT_CPM", "ATDOUT", "BEARING", "BNDOUT", "CURVOUT",
+    "DCFAIL", "DEFGEO", "DEFORC", "DISBOUT", "ELOUT", "GCEOUT", "GLSTAT",
+    "GLSTAT_MASS_PROPERTIES", "H3OUT", "JNTFORC", "MATSUM", "MOVIE", "MPGS",
+    "NCFORC", "NODFOR", "NODOUT", "PBSTAT", "PLLYOUT", "PRTUBE", "RBDOUT",
+    "RCFORC", "RWFORC", "SBTOUT", "SECFORC", "SLEOUT", "SPCFORC",
+    "SPHMASSFLOW", "SPHOUT", "SSSTAT", "SSSTAT_MASS_PROPERTIES", "SWFORC",
+    "TPRINT", "TRHIST",
+}
 # known-unsupported: abort (hard). *INCLUDE is bypassed by --follow-includes.
 HARD_FLAGS = {
     "INCLUDE": "multi-file deck - re-run with --follow-includes to convert "
@@ -372,6 +392,10 @@ def h_define_curve(block: Block, ctx, edit: bool) -> None:
     if not data:
         return
     lcid = _numint(kf, data[0], STD8, block.long, 0)
+    if lcid is None:
+        ctx.error(f"*{block.name}: LCID field is blank or unparseable - "
+                  "the curve cannot be identified.")
+        return
     if not edit:
         ctx.curve_blocks.setdefault(lcid, []).append((kf, block))
         return
@@ -421,6 +445,10 @@ def h_define_table(block: Block, ctx, edit: bool) -> None:
     if not data:
         return
     tbid = _numint(kf, data[0], STD8, block.long, 0)
+    if tbid is None:
+        ctx.error(f"*{block.name}: TBID field is blank or unparseable - "
+                  "the table cannot be identified.")
+        return
     if not edit:
         ctx.table_blocks[tbid] = (kf, block)
         # 'value, lcid' pair form: second numeric field names the sub-curve
@@ -446,15 +474,21 @@ def h_define_table(block: Block, ctx, edit: bool) -> None:
 
 
 def h_load_body(block: Block, ctx, edit: bool) -> None:
+    """*LOAD_BODY_X/Y/Z/RX/RY/RZ only (R16 Vol I p.33-24): LCID SF LCIDDR
+    XC YC ZC CID.  resolve() keeps GENERALIZED/POROUS away from here -
+    their layouts differ."""
     axis = block.name.rsplit("_", 1)[-1]
     ydim = ACCEL if axis in ("X", "Y", "Z") else ANG_ACCEL
     kf = ctx.kf
     for li in block.data:
         lcid = _numint(kf, li, STD8, block.long, 0)
+        lciddr = _numint(kf, li, STD8, block.long, 2)   # dyn. relax. curve
         if not edit:
             if lcid:
                 ctx.register_curve(lcid, TIME, ydim, block.name)
                 ctx.probes["gravity_lcids"].append(lcid)
+            if lciddr:
+                ctx.register_curve(lciddr, TIME, ydim, block.name + " LCIDDR")
         else:
             for fi in (3, 4, 5):   # XC YC ZC (angular arm point)
                 kf.scale_field(li, STD8, block.long, fi, ctx.fac(LENGTH))
@@ -519,10 +553,10 @@ def h_contact(block: Block, ctx, edit: bool) -> None:
     if tiebreak:
         # R16 Vol I p.11-35 Card 4: OPTION NFLS SFLS PARAM ERATEN ERATES
         # CT2CN CN.  ERATEN/ERATES = energy/area, CN = stiffness/length.
+        # It comes BEFORE the optional cards A and B.
         plan.append({1: PRESSURE, 2: PRESSURE, 4: STIFF, 5: STIFF,
                      7: STIFF_LEN})
-    else:
-        plan.append({})                                  # A (flags)
+    plan.append({})                                      # A (flags)
     plan.append({6: LENGTH, 7: PRESSURE})                # B: SLDTHK SLDSTF
     for ci, li in enumerate(data):
         if ci >= len(plan):
@@ -1508,7 +1542,7 @@ def h_cnrb_inertia(block: Block, ctx, edit: bool) -> None:
     if not edit:
         return
     kf = ctx.kf
-    d = block.data
+    d = _strip_title(block, list(block.data))
     plans = [{}, {0: LENGTH, 1: LENGTH, 2: LENGTH, 3: MASS},
              {i: INERTIA for i in range(6)},
              {0: VELOCITY, 1: VELOCITY, 2: VELOCITY,
@@ -1544,6 +1578,20 @@ def h_part_composite(block: Block, ctx, edit: bool) -> None:
         for fi in thick_fields:
             kf.scale_field(li, STD8, block.long, fi, ctx.fac(LENGTH))
     ctx.count(block.name)
+
+
+def x_part_inertia(block: Block, ctx) -> None:
+    """Edit-time check: IRCS=1 (R16 Vol I p.37-13) inserts an extra local-
+    coordinate-system card after the inertia card, which the fixed 5-card
+    group cannot model - refuse rather than scale shifted cards."""
+    kf = ctx.kf
+    data = list(block.data)
+    for i in range(2, len(data), 5):            # card 3 of each part
+        if (_numint(kf, data[i], STD8, block.long, 4) or 0):
+            ctx.error(f"*{block.name}: IRCS != 0 adds a local-coordinate "
+                      "card the fixed layout cannot model - convert this "
+                      "part manually.")
+            return
 
 
 def x_scan_part(block: Block, ctx) -> None:
@@ -1613,8 +1661,8 @@ def resolve(name: str):
         if base.endswith(opt):
             base = base[: -len(opt)]
     base = _MAT_ALIASES.get(base, base)
-    if name in HARD_FLAGS:
-        return "hard", HARD_FLAGS[name]
+    if name in HARD_FLAGS or base in HARD_FLAGS:
+        return "hard", HARD_FLAGS.get(name) or HARD_FLAGS[base]
     if base in CUSTOM:
         return "custom", CUSTOM[base]
     if base in SPECS:
@@ -1625,7 +1673,11 @@ def resolve(name: str):
         if name.startswith(p):
             return "white", None
     if name.startswith("LOAD_BODY_"):
-        return "custom", h_load_body
+        # GENERALIZED / POROUS / GENERALIZED_SET_NODE... have different
+        # layouts (N1 N2 LCID DRLCID XC YC ZC + accel card) - not modelled
+        if name.rsplit("_", 1)[-1] in ("X", "Y", "Z", "RX", "RY", "RZ"):
+            return "custom", h_load_body
+        return "unknown", None
     if name.startswith("BOUNDARY_PRESCRIBED_MOTION"):
         # SET_BOX / SET_EDGE_UVW / SET_FACE_XYZ / SET_LINE / SET_POINT_UVW
         # insert extra geometry cards the plain layout cannot model
@@ -1636,8 +1688,14 @@ def resolve(name: str):
     if name.startswith("RIGIDWALL_PLANAR"):
         return "custom", h_rigidwall_planar
     if name.startswith("CONTACT_"):
+        # families whose card 2/3 layouts differ from the 3D penalty
+        # layout h_contact models must not be routed there
         if (name.startswith("CONTACT_TIEBREAK") or "DRAWBEAD" in name
-                or "MPP" in name or "DAMPING" in name or "MORTAR" in name):
+                or "MPP" in name or "DAMPING" in name or "MORTAR" in name
+                or name.startswith("CONTACT_2D") or "ENTITY" in name
+                or "GEBOD" in name or "INTERIOR" in name
+                or "GUIDED_CABLE" in name or "COUPLING" in name
+                or "AUTO_MOVE" in name):
             return "unknown", None
         return "custom", h_contact
     if name.startswith("DATABASE_FREQUENCY_BINARY"):
@@ -1646,11 +1704,21 @@ def resolve(name: str):
         return "unknown", None      # ASCII variants: layout not modelled
     if name.startswith("DATABASE_BINARY_"):
         tail = name[len("DATABASE_BINARY_"):]
-        if tail in ("D3DUMP", "RUNRSF", "D3DRLF"):
+        if tail in ("D3DUMP", "RUNRSF", "D3DRLF",   # cycle intervals
+                    "D3PROP"):                      # flags only
             return "white", None
-        return "custom", h_database_dt
+        if tail in ("D3PLOT", "D3PART", "D3THDT", "INTFOR", "FSIFOR",
+                    "BLSTFOR", "D3MEAN"):
+            return "custom", h_database_dt
+        return "unknown", None
     if name.startswith("DATABASE_"):
-        return "custom", h_database_dt          # ascii files: field 0 = dt
+        # only the ASCII output-file keywords have 'DT' as field 0
+        # (R16 Vol I *DATABASE_OPTION table); anything else (e.g.
+        # NODAL_FORCE_GROUP: NSID CID, TRACER: TIME X Y Z) must not have
+        # its first field blindly scaled as a time
+        if name[len("DATABASE_"):] in _DATABASE_ASCII:
+            return "custom", h_database_dt
+        return "unknown", None
     if name.startswith("CONTROL_"):
         return "soft", ("not in the dimension table - left unchanged; "
                         "most CONTROL cards are flags, but verify")
@@ -1670,4 +1738,5 @@ EDIT_EXTRA: Dict[str, Callable] = {
     "MAT_ELASTIC_FLUID": x_mat_001,
     "MAT_JOHNSON_COOK": x_mat_015,
     "MAT_POWER_LAW_PLASTICITY": x_mat_018,
+    "PART_INERTIA": x_part_inertia,
 }

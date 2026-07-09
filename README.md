@@ -45,7 +45,10 @@ kunit gui                                # or kunit-gui
   curves-following-the-table form), plus a safety inventory. Pass 2 rewrites
   fields in place respecting true column layouts (`*NODE` I8+3E16,
   `*ELEMENT_MASS` I8,I8,F16,I8, curve data 2E20, long format ×20), comma
-  free-format lines, and E-less Fortran exponents (`7.85000-9`).
+  free-format lines, E-less Fortran exponents (`7.85000-9`) and Fortran
+  double exponents (`1.0D+5`). Blank lines inside a keyword block are
+  treated as what they are in LS-DYNA — all-default data cards — so
+  optional-card skipping never shifts later cards onto the wrong field map.
 * **Safety net:** every keyword in the deck must be classified — scalable
   (schema/custom handler), dimensionless whitelist, or known-unsupported.
   Anything unknown **aborts** the conversion (override: `--allow-unknown`,
@@ -73,7 +76,9 @@ for CI pipelines.
 
 * **Self-check** (default on): after writing, the output is re-detected and
   must score as the *target* system — a missed dimensional field (schema gap)
-  shows up immediately as `SELF-CHECK FAILED`.
+  shows up immediately as `SELF-CHECK FAILED`. The re-detection ignores
+  header comments (including kunit's own conversion stamp), so the check is
+  driven by physical evidence only and cannot confirm its own claim.
 * **`--verify-roundtrip`**: converts the output back to the source system and
   forward again; the two forward results must agree byte-for-byte (comments
   ignored), proving formatting lost no precision.
