@@ -475,8 +475,12 @@ def h_load_node_or_rb(block: Block, ctx, edit: bool) -> None:
 
 
 def h_prescribed_motion(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.7-115..7-124: repeating cards ID/SID DOF VAD LCID SF VID
+    DEATH BIRTH; the _ID option prepends one 'ID HEADING' card, which must
+    not be parsed as a motion card (its free text would be misread as
+    DOF/VAD/LCID and any number in the DEATH/BIRTH columns rescaled)."""
     kf = ctx.kf
-    for li in block.data:
+    for li in _strip_title(block, list(block.data)):
         dof = abs(_numint(kf, li, STD8, block.long, 1) or 0)
         vad = _numint(kf, li, STD8, block.long, 2) or 0
         lcid = _numint(kf, li, STD8, block.long, 3)
@@ -1543,10 +1547,17 @@ def h_part_composite(block: Block, ctx, edit: bool) -> None:
 
 
 def x_scan_part(block: Block, ctx) -> None:
-    """Collect (pid, secid, mid) so DRO can classify discrete materials."""
+    """Collect (pid, secid, mid) so DRO can classify discrete materials.
+
+    Works for every *PART variant with a Spec: the ids card is always the
+    second card of the repeating group (after the heading), and the group
+    length gives the per-part period (2 for PART, 3 for PART_CONTACT,
+    5 for PART_INERTIA)."""
     kf = ctx.kf
+    kind, spec = resolve(block.name)
+    step = (len(spec.group) if kind == "spec" and spec.group else 2)
     data = list(block.data)
-    for i in range(1, len(data), 2):     # heading, ids, heading, ids ...
+    for i in range(1, len(data), step):
         pid = _numint(kf, data[i], STD8, block.long, 0)
         secid = _numint(kf, data[i], STD8, block.long, 1)
         mid = _numint(kf, data[i], STD8, block.long, 2)
@@ -1616,6 +1627,11 @@ def resolve(name: str):
     if name.startswith("LOAD_BODY_"):
         return "custom", h_load_body
     if name.startswith("BOUNDARY_PRESCRIBED_MOTION"):
+        # SET_BOX / SET_EDGE_UVW / SET_FACE_XYZ / SET_LINE / SET_POINT_UVW
+        # insert extra geometry cards the plain layout cannot model
+        if any(t in name for t in ("_BOX", "_EDGE", "_FACE", "_LINE",
+                                   "_POINT")):
+            return "unknown", None
         return "custom", h_prescribed_motion
     if name.startswith("RIGIDWALL_PLANAR"):
         return "custom", h_rigidwall_planar
@@ -1645,6 +1661,8 @@ def resolve(name: str):
 SCAN_EXTRA: Dict[str, Callable] = {
     "MAT_PIECEWISE_LINEAR_PLASTICITY": h_mat_024,
     "PART": x_scan_part,
+    "PART_INERTIA": x_scan_part,
+    "PART_CONTACT": x_scan_part,
 }
 # edit-time extras (warnings that need field values)
 EDIT_EXTRA: Dict[str, Callable] = {

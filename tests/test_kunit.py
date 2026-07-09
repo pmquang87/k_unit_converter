@@ -464,6 +464,24 @@ class NewFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(float(lines[secs[1] + 1][30:40]), 2000.0)
         self.assertAlmostEqual(float(lines[secs[1] + 1][40:50]), 10.0)
 
+    def test_discrete_spring_dro_via_part_contact(self):
+        # a torsional spring wired through *PART_CONTACT (3-card group) must
+        # still be classified via DRO - the part->section->material link used
+        # to be collected from plain *PART only, with a 2-card period
+        deck = ("*KEYWORD\n"
+                "*SECTION_DISCRETE\n" + F(100, 1, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + F(0.0, 0.0) + "\n"
+                "*PART_CONTACT\ntorsional\n" + F(10, 100, 1, 0, 0, 0, 0, 0)
+                + "\n" + F(0.3, 0.2, 0.0, 0.0, 0.0) + "\n"
+                "*MAT_SPRING_ELASTIC\n" + F(1, 1000.0) + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, SI, TON, out, self_check=False)
+        lines = _lines(out)
+        mat = lines.index("*MAT_SPRING_ELASTIC")
+        # torsional stiffness N*m/rad -> N*mm/rad (x1e3), not N/m -> N/mm
+        self.assertAlmostEqual(float(lines[mat + 1][10:20]), 1.0e6)
+
     def test_rigidwall_planar_moving(self):
         deck = ("*KEYWORD\n*RIGIDWALL_PLANAR_MOVING\n"
                 + F(0, 0, 0, 0.1, 0.0, "1.0E20", 1.0) + "\n"
@@ -591,6 +609,34 @@ class NewFeatureTests(unittest.TestCase):
         self.assertAlmostEqual(float(ln[10:20]), 10000.0)  # vx mm/s
         self.assertAlmostEqual(float(ln[30:40]), -5000.0)  # vz
         self.assertAlmostEqual(float(ln[50:60]), 2.0)      # vyr rad/s unchanged
+
+    def test_prescribed_motion_id_heading_preserved(self):
+        # the _ID heading card must not be parsed as a motion card: numeric
+        # text in its DEATH/BIRTH columns must survive, and no bogus curve
+        # may be registered from the LCID column of the heading
+        heading = ("       777" + "impact of plate case".ljust(20)
+                   + "       42 ".ljust(30) + "     0.005")
+        deck = ("*KEYWORD\n*BOUNDARY_PRESCRIBED_MOTION_SET_ID\n"
+                + heading + "\n"
+                + F(1, 3, 0, 9, 1.0, 0, 20.0, 0.0) + "\n"
+                "*DEFINE_CURVE\n" + F(9, w=10) + "\n"
+                + F(0.0, 0.0, w=20) + "\n" + F(1.0, 30.0, w=20) + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, SI, parse_system("kg-m-ms"), out, self_check=False)
+        li = _lines(out)
+        at = li.index("*BOUNDARY_PRESCRIBED_MOTION_SET_ID")
+        self.assertEqual(li[at + 1], heading)              # byte-for-byte
+        self.assertAlmostEqual(float(li[at + 2][60:70]), 20000.0)  # DEATH ms
+        cv = li[li.index("*DEFINE_CURVE") + 2:]
+        self.assertAlmostEqual(float(cv[1][20:40]), 0.03)  # vel m/ms
+
+    def test_prescribed_motion_box_refused(self):
+        deck = ("*KEYWORD\n*BOUNDARY_PRESCRIBED_MOTION_SET_BOX\n"
+                + F(1, 3, 0, 9, 1.0, 0, 0.0, 0.0) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "unknown keywords"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
 
     def test_mat_composite_damage(self):
         deck = ("*KEYWORD\n*MAT_COMPOSITE_DAMAGE_TITLE\nGrEP\n"
@@ -750,7 +796,75 @@ class NewFeatureTests(unittest.TestCase):
             convert(p, SI, TON, p + ".o.k", self_check=False)
 
     def test_gui_imports(self):
+        try:
+            import tkinter  # noqa: F401
+        except ImportError:
+            self.skipTest("tkinter not available (headless python build)")
         import kunit.gui  # noqa: F401  (no Tk instantiation)
+
+
+class CliTests(unittest.TestCase):
+    """`kunit check` / `kunit detect --json` (no files are written)."""
+
+    def _run(self, *argv):
+        import contextlib
+        import io
+        from kunit.cli import main
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = main(list(argv))
+        return rc, buf.getvalue()
+
+    def test_check_convertible_deck(self):
+        p = _write(DECK_SI)
+        rc, out = self._run("check", p)
+        self.assertEqual(rc, 0)
+        self.assertIn("verdict: convertible", out)
+        self.assertIn("*NODE", out)
+        self.assertIn("lcid 1", out)          # LOAD_BODY_Z gravity curve
+        self.assertIn("time vs acceleration", out)
+
+    def test_check_unknown_and_hard(self):
+        deck = ("*KEYWORD\n*MY_STRANGE_KEYWORD\n" + F(1.0, 2.0) + "\n"
+                "*PARAMETER\nR dt 0.001\n*END\n")
+        p = _write(deck)
+        rc, out = self._run("check", p)
+        self.assertEqual(rc, 1)               # hard stop dominates
+        self.assertIn("HARD STOPS", out)
+        self.assertIn("*PARAMETER", out)
+        self.assertIn("*MY_STRANGE_KEYWORD", out)
+        self.assertIn("NOT convertible", out)
+
+    def test_check_unresolved_curve(self):
+        deck = ("*KEYWORD\n*DEFINE_CURVE\n" + F(77, w=10) + "\n"
+                + F(0.0, 1.0, w=20) + "\n*END\n")
+        p = _write(deck)
+        rc, out = self._run("check", p)
+        self.assertEqual(rc, 0)
+        self.assertIn("lcid 77", out)
+        self.assertIn("UNRESOLVED", out)
+
+    def test_check_json(self):
+        import json
+        p = _write(DECK_SI)
+        rc, out = self._run("check", p, "--json")
+        self.assertEqual(rc, 0)
+        doc = json.loads(out)
+        self.assertTrue(doc["convertible"])
+        self.assertEqual(doc["keywords"]["NODE"]["kind"], "spec")
+        self.assertEqual(doc["curves"]["1"]["status"], "resolved")
+        self.assertEqual(doc["curves"]["1"]["demands"][0]["y"], "acceleration")
+
+    def test_detect_json(self):
+        import json
+        p = _write(DECK_SI)
+        rc, out = self._run("detect", p, "--json")
+        self.assertEqual(rc, 0)
+        doc = json.loads(out)
+        self.assertEqual(doc["system"], "kg-m-s")
+        self.assertFalse(doc["ambiguous"])
+        self.assertEqual(doc["scores"][0]["system"], "kg-m-s")
+        self.assertTrue(doc["evidence"])
 
 
 class IcfdTests(unittest.TestCase):

@@ -13,6 +13,9 @@ pip install -e .            # gives the `kunit` and `kunit-gui` commands
 
 kunit systems                            # list presets
 kunit detect  deck.k                     # what units is this deck in?
+kunit detect  deck.k --json              # machine-readable verdict (CI-friendly)
+kunit check   deck.k                     # coverage report: convertible as-is?
+kunit check   deck.k --follow-includes --json
 kunit convert deck.k --to ton-mm-s       # auto-detect source, write deck__ton-mm-s.k
 kunit convert deck.k --to g-mm-ms --from kg-m-s -o out.k
 kunit convert deck.k --to ton-mm-s --in-place          # keeps .orig_<from> backups
@@ -56,6 +59,15 @@ kunit gui                                # or kunit-gui
   `*LOAD_BODY` curves (9.80665 m/s²), and `$ Unit system :` header comments,
   gathering evidence across the whole include tree. Ambiguous verdicts refuse
   to convert without an explicit `--from`.
+
+## Checking a deck without converting
+
+`kunit check deck.k` classifies every keyword (scalable / dimensionless /
+left-unchanged / hard-stop / unknown), reports how each `*DEFINE_CURVE`'s
+axis dimensions were resolved (and which curves need a `--curve` override),
+and gives a verdict: exit 0 = convertible, 1 = hard stops, 2 = unknown
+keywords. `--json` (also on `kunit detect`) emits the same report as JSON
+for CI pipelines.
 
 ## Verification built in
 

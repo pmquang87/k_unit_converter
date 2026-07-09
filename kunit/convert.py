@@ -298,6 +298,24 @@ def scan(files, src: Optional[UnitSystem], opts: Optional[dict] = None) -> Ctx:
     return ctx
 
 
+def inventory(files, follow_includes: bool = False) -> Dict[str, Tuple[str, int]]:
+    """Classify every keyword present: name -> (kind, occurrence count).
+
+    kind is resolve()'s verdict: 'spec'/'custom' (scalable), 'white'
+    (dimensionless), 'soft' (left unchanged with a warning), 'hard'
+    (refused) or 'unknown'. *INCLUDE is skipped when follow_includes,
+    mirroring convert()."""
+    inv: Dict[str, Tuple[str, int]] = {}
+    for kf in files:
+        for block in kf.blocks:
+            if block.name == "INCLUDE" and follow_includes:
+                continue
+            kind, _ = resolve(block.name)
+            prev = inv.get(block.name)
+            inv[block.name] = (kind, (prev[1] if prev else 0) + 1)
+    return inv
+
+
 # ── conversion ───────────────────────────────────────────────────────────────
 
 def _out_path_for(in_path: str, dst: UnitSystem) -> str:
