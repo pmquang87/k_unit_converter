@@ -30,6 +30,36 @@ kunit gui                                # or kunit-gui
 `kg g ton(=Mg/tonne/t) lb slug slinch`, length `m mm cm in ft`, time `s ms us`
 — any combination, e.g. `--to kg-cm-ms`.
 
+> The GUI (`kunit gui` / `kunit-gui`) needs Tkinter, which ships with most
+> CPython builds but is a **separate OS package** on some Linux distros —
+> e.g. `sudo apt install python3-tk` on Debian/Ubuntu. The CLI has no such
+> dependency.
+
+## Use as a library
+
+Everything the CLI does is importable — no subprocess required:
+
+```python
+from kunit import convert, detect, PRESETS
+
+verdict = detect("deck.k")                 # auto-detect current units
+print(verdict.system, verdict.ambiguous)   # e.g. kg-m-s, False
+
+src = PRESETS["kg-m-s"]
+dst = PRESETS["ton-mm-s"]
+convert("deck.k", src, dst, "deck__ton-mm-s.k")   # write the converted deck
+```
+
+The full public API is `convert, report, scan, detect, ConvertError,
+load_tree, UnitSystem, PRESETS, parse_system, parse_dim_name, factor`
+(see `kunit/__init__.py`).
+
+## Examples
+
+Ready-to-run sample decks live in [`examples/`](examples/) — small valid
+LS-DYNA decks in different unit systems you can `detect`, `check`, and
+`convert`. See [`examples/README.md`](examples/README.md).
+
 ## How it works
 
 * Every unit system is an (M, L, T) triple stored as exact `Fraction`s; every
@@ -122,7 +152,8 @@ extending = one `Spec` line in `kunit/schema.py`.
 
 ## Validation
 
-* 30 unit tests (`python -m unittest discover -s tests`).
+* A comprehensive unittest suite (run `python -m unittest discover -s tests`),
+  green on the CI matrix (Linux + Windows, Python 3.9 and 3.13).
 * End-to-end: the 8.6 MB W13 blast-vehicle deck (kg/m/s → ton/mm/s) matches a
   manually converted, OpenRadioss-starter-validated reference on **all
   110,565 data lines with zero numeric differences**; its k2rad→OpenRadioss

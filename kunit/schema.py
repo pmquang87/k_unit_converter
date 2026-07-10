@@ -15,9 +15,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field as dfield
 from decimal import Decimal
 from fractions import Fraction
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import (Callable, Dict, List, Optional, Sequence, Tuple,
+                    TYPE_CHECKING)
 
 from .parser import STD8, Block, KFile, format_fixed, parse_number
+
+if TYPE_CHECKING:
+    # imported for handler type annotations only; convert.py imports schema.py
+    # at runtime, so importing it here would create a circular import.
+    from .convert import Ctx
 from .units import (ACCEL, ACCEL_PSD, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC,
                     DENSITY, Dim, DIM_NAMES, DIMLESS, DISP_PSD, FORCE,
                     FORCE_PSD, FREQ, INERTIA, L4, LENGTH,
@@ -162,10 +168,104 @@ SPECS: Dict[str, Spec] = {
         C({0: PRESSURE, 1: PRESSURE, 2: PRESSURE, 3: PRESSURE, 4: STRESS_M3,
            5: PRESSURE, 6: PRESSURE, 7: PRESSURE})],
         probe={"ro": (0, 1), "e": (0, 2)}),
-    "MAT_NULL": Spec(cards=[
-        C({1: DENSITY, 2: PRESSURE, 3: VISCOSITY, 6: PRESSURE})],
-        probe={"ro": (0, 1)}),
-    "MAT_VACUUM": Spec(cards=[C({1: DENSITY})], probe={"ro": (0, 1)}),
+    # R16 Vol II p.2-153..2-156 (*MAT_ORTHOTROPIC_ELASTIC / MAT_002):
+    # Card1 MID RO EA EB EC PRBA PRCA PRCB - EA/EB/EC the orthotropic Young's
+    # moduli (stresses), Poisson ratios dimensionless; Card2 GAB GBC GCA AOPT
+    # (G/MACF...) - the three shear moduli are stresses, AOPT/MACF are flags;
+    # Card3 XP YP ZP A1 A2 A3 and Card4 V1 V2 V3 D1 D2 D3 BETA REF are the AOPT
+    # coordinate/vector cards (XP/YP/ZP a point, the rest direction cosines and
+    # an angle), handled exactly like MAT_COMPOSITE_DAMAGE.
+    "MAT_ORTHOTROPIC_ELASTIC": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 3: PRESSURE, 4: PRESSURE}),
+        C({0: PRESSURE, 1: PRESSURE, 2: PRESSURE}),
+        C({0: LENGTH, 1: LENGTH, 2: LENGTH}),
+        C()],
+        probe={"ro": (0, 1), "e": (0, 2)}, extra_ok=True),
+    # R16 Vol II p.2-262..2-271 (*MAT_ENHANCED_COMPOSITE_DAMAGE / MAT_054/055):
+    # extends MAT_022.  Card1 MID RO EA EB EC PRBA PRCA PRCB; Card2 GAB GBC GCA
+    # KF AOPT (KF = bulk modulus of failed material, a stress); Card3 XP YP ZP
+    # A1 A2 A3 MANGLE (point + direction + angle); Card4 V1 V2 V3 D1 D2 D3
+    # DFAILM DFAILS (direction cosines + failure strains); Card5 TFAIL ALPH
+    # SOFT FBRT YCFAC DFAILT DFAILC EFS - all dimensionless / value-dependent
+    # (TFAIL is a time-step-size criterion only for 0<TFAIL<=.1 else a ratio,
+    # ALPH a 0-1 shear weight, the DFAIL*/EFS are failure strains), so Card5
+    # is left unscaled; Card6 XC XT YC YT SC CRIT BETA - the five strengths
+    # are stresses.  Cards 7/8 (PEL/EPSF/EPSR strains, SLIM* factors) tolerated.
+    "MAT_ENHANCED_COMPOSITE_DAMAGE": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 3: PRESSURE, 4: PRESSURE}),
+        C({0: PRESSURE, 1: PRESSURE, 2: PRESSURE, 3: PRESSURE}),
+        C({0: LENGTH, 1: LENGTH, 2: LENGTH}),
+        C(),
+        C(),
+        C({0: PRESSURE, 1: PRESSURE, 2: PRESSURE, 3: PRESSURE, 4: PRESSURE})],
+        probe={"ro": (0, 1), "e": (0, 2)}, extra_ok=True),
+    # R16 Vol II p.2-330..2-332 (*MAT_SIMPLIFIED_JOHNSON_COOK / MAT_098):
+    # Card1 MID RO E PR VP - E the Young's modulus (stress), PR/VP flags;
+    # Card2 A B N C PSFAIL SIGMAX SIGSAT EPS0 - A/B (yield & hardening
+    # coefficients) and SIGMAX/SIGSAT (max & saturation stresses) are stresses;
+    # N, C (the dimensionless strain-rate sensitivity coefficient, exactly as
+    # in the full MAT_015 layout) and PSFAIL (failure plastic strain) are
+    # dimensionless.  EPS0 (reference strain rate, default 1.0) is left
+    # unscaled - verify manually if a non-default EPS0 is used and the time
+    # unit changes.  An optional failure/erosion card is tolerated (extra_ok).
+    "MAT_SIMPLIFIED_JOHNSON_COOK": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE}),
+        C({0: PRESSURE, 1: PRESSURE, 5: PRESSURE, 6: PRESSURE})],
+        probe={"ro": (0, 1), "e": (0, 2)}, extra_ok=True),
+    # R16 Vol II p.2-338..2-341 (*MAT_SPOTWELD / MAT_100): Card1 MID RO E PR
+    # SIGY ET DT TFAIL - E/SIGY/ET stresses, DT (mass-scaling time step) and
+    # TFAIL (failure time) are times.  The Card2 failure resultants
+    # NRR/NRS/NRT/MRR/MSS/MTT are force/moment for the resultant-based failure
+    # but stresses for the stress-based option, so they are NOT scaled by this
+    # Spec - x_mat_100 (EDIT_EXTRA) warns about them instead of guessing.
+    "MAT_SPOTWELD": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 4: PRESSURE, 5: PRESSURE, 6: TIME,
+           7: TIME})],
+        probe={"ro": (0, 1), "e": (0, 2)}, extra_ok=True),
+    # R16 Vol II p.2-241..2-244 (*MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY /
+    # MAT_123): Card1 MID RO E PR SIGY ETAN FAIL TDEL is field-for-field the
+    # MAT_024 layout (E/SIGY/ETAN stresses, FAIL a failure plastic strain,
+    # TDEL a minimum deletion time step); Card2 C P LCSS LCSR VP EPSTHIN
+    # EPSMAJ NUMINT (C the Cowper-Symonds strain-rate coefficient); Cards 3/4
+    # the EPS/ES stress-strain points.  LCSS/LCSR are registered by h_mat_024.
+    "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 4: PRESSURE, 5: PRESSURE, 7: TIME}),
+        C({0: RATE}),
+        C(),
+        C({i: PRESSURE for i in range(8)})],
+        probe={"ro": (0, 1), "e": (0, 2)}),
+    # R16 Vol II p.2-289..2-290 (*MAT_CRUSHABLE_FOAM / MAT_063): Card1 MID RO E
+    # PR LCID TSC DAMP - E the Young's modulus and TSC the tension stress
+    # cutoff (both stresses); LCID is yield stress vs volumetric strain
+    # (abscissa dimensionless, ordinate a stress); PR and DAMP (rate-
+    # sensitivity damping coefficient) are dimensionless.
+    "MAT_CRUSHABLE_FOAM": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 5: PRESSURE})],
+        curves=[(0, 4, DIMLESS, PRESSURE)],
+        probe={"ro": (0, 1), "e": (0, 2)}),
+    # R16 Vol II p.2-274..2-277 (*MAT_LOW_DENSITY_FOAM / MAT_057): Card1 MID RO
+    # E LCID TC HU BETA DAMP - E the initial Young's modulus, TC the tension
+    # cutoff (stresses); LCID is nominal stress vs strain (abscissa
+    # dimensionless, ordinate a stress).  HU (hysteretic unloading factor) and
+    # DAMP are dimensionless; BETA (a decay constant, 1/time) and the optional
+    # Card2 relaxation fields are value/model dependent and left unscaled
+    # (extra_ok) - verify BETA manually if the time unit changes.
+    "MAT_LOW_DENSITY_FOAM": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 4: PRESSURE})],
+        curves=[(0, 3, DIMLESS, PRESSURE)],
+        probe={"ro": (0, 1), "e": (0, 2)}, extra_ok=True),
+    # R16 Vol II p.2-560..2-564 (*MAT_SIMPLIFIED_RUBBER/FOAM / MAT_181): Card1
+    # MID RO KM MU G SIGF REF PRTEN - KM the linear bulk modulus (a stress).
+    # Only RO and KM are scaled here: MU/G/SIGF/PRTEN are value/flag dependent,
+    # and the Card2 specimen geometry (SGL/SW/ST lengths) plus the LC/TBID
+    # stress-vs-stretch data are flag dependent (engineering stress-strain vs
+    # force-displacement per the SGL/SW/ST normalisation), so that card is
+    # left for a --curve override rather than mis-scaled (extra_ok).
+    "MAT_SIMPLIFIED_RUBBER/FOAM": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE})],
+        probe={"ro": (0, 1)}, extra_ok=True),
+    # MAT_NULL / MAT_VACUUM are registered below via register_keyword() as a
+    # demonstration of the one-stop hook (see end of file).
     "MAT_HIGH_EXPLOSIVE_BURN": Spec(cards=[
         C({1: DENSITY, 2: VELOCITY, 3: PRESSURE, 5: PRESSURE, 6: PRESSURE,
            7: PRESSURE})],
@@ -287,18 +387,39 @@ SPECS: Dict[str, Spec] = {
     # p.8-18 documents the companion element card as 6i8, not 6i10).
     "MESH_SURFACE_NODE": Spec(repeat=C(
         {1: LENGTH, 2: LENGTH, 3: LENGTH}, (8, 16, 16, 16))),
+
+    # ── airbags (R16 Vol I) ─────────────────────────────────────────────────
+    # R16 Vol I p.5-2 (*AIRBAG_REFERENCE_GEOMETRY): repeating node cards
+    # NID X Y Z (i8 + 3e16, like *NODE) giving the reference/unstretched airbag
+    # geometry - only the coordinates are dimensional (lengths).  The _BIRTH /
+    # _RDT / _RDT_ID options keep their own base names and prepend a BIRTH-time
+    # or flag card, so they are deliberately not routed here.
+    "AIRBAG_REFERENCE_GEOMETRY": Spec(repeat=C(
+        {1: LENGTH, 2: LENGTH, 3: LENGTH}, (8, 16, 16, 16))),
 }
 
 # numeric aliases
 _MAT_ALIASES = {
     "MAT_001": "MAT_ELASTIC", "MAT_001_FLUID": "MAT_ELASTIC_FLUID",
+    "MAT_002": "MAT_ORTHOTROPIC_ELASTIC",
     "MAT_003": "MAT_PLASTIC_KINEMATIC",
-    "MAT_008": "MAT_HIGH_EXPLOSIVE_BURN", "MAT_009": "MAT_NULL",
+    "MAT_008": "MAT_HIGH_EXPLOSIVE_BURN",
+    # "MAT_009" -> MAT_NULL registered via register_keyword() (end of file)
     "MAT_015": "MAT_JOHNSON_COOK",
     "MAT_018": "MAT_POWER_LAW_PLASTICITY",
     "MAT_020": "MAT_RIGID", "MAT_022": "MAT_COMPOSITE_DAMAGE",
     "MAT_024": "MAT_PIECEWISE_LINEAR_PLASTICITY",
-    "MAT_140": "MAT_VACUUM",
+    "MAT_054": "MAT_ENHANCED_COMPOSITE_DAMAGE",
+    "MAT_055": "MAT_ENHANCED_COMPOSITE_DAMAGE",
+    "MAT_057": "MAT_LOW_DENSITY_FOAM",
+    "MAT_063": "MAT_CRUSHABLE_FOAM",
+    "MAT_098": "MAT_SIMPLIFIED_JOHNSON_COOK",
+    "MAT_100": "MAT_SPOTWELD",
+    "MAT_123": "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY",
+    "MAT_181": "MAT_SIMPLIFIED_RUBBER/FOAM",
+    # "MAT_140" -> MAT_VACUUM registered via register_keyword() (end of file)
+    # newer *DEFINE_TABLE spellings share the base handler
+    "DEFINE_TABLE_2D": "DEFINE_TABLE", "DEFINE_TABLE_3D": "DEFINE_TABLE",
     "MAT_159": "MAT_CSCM", "MAT_159_CONCRETE": "MAT_CSCM_CONCRETE",
     "MAT_S01": "MAT_SPRING_ELASTIC", "MAT_S02": "MAT_DAMPER_VISCOUS",
     "MAT_S03": "MAT_SPRING_ELASTOPLASTIC",
@@ -322,6 +443,16 @@ WHITELIST = {
     "LOAD_BODY_PARTS", "HOURGLASS",
     "CONSTRAINED_NODAL_RIGID_BODY", "CONSTRAINED_EXTRA_NODES_NODE",
     "CONSTRAINED_EXTRA_NODES_SET", "CONSTRAINED_RIGID_BODIES",
+    # R16 Vol I p.10-... *CONSTRAINED_TIED_NODES_FAILURE: NSID EPPF ETYPE -
+    # EPPF is a plastic strain at failure (dimensionless), the rest ids/flags.
+    "CONSTRAINED_TIED_NODES_FAILURE",
+    # R16 Vol I p.41-... *SECTION_TSHELL: SECID ELFORM SHRF NIP PROPT QR/IRID
+    # ICOMP TSHEAR (+ optional Bi angle card) - a thick-shell section whose
+    # thickness comes from the element geometry, so it carries flags/counts/
+    # dimensionless factors only.  *DEFINE_COORDINATE_VECTOR: CID XX YX ZX XV
+    # YV ZV NID - normalised direction cosines only (no origin, unlike
+    # _SYSTEM), treated dimensionless like *DEFINE_SD_ORIENTATION.
+    "SECTION_TSHELL", "DEFINE_COORDINATE_VECTOR",
     "DEFINE_COORDINATE_NODES", "DEFINE_SD_ORIENTATION",
     "ALE_MULTI-MATERIAL_GROUP", "MAT_ADD_PORE_AIR",
     "INITIAL_VOID_PART", "INITIAL_VOID_SET",
@@ -669,6 +800,26 @@ def x_mat_018(block: Block, ctx) -> None:
                   "p.2-224) - convert this material manually.")
         return
     kf.scale_field(data[1], STD8, block.long, 0, f)
+
+
+def x_mat_100(block: Block, ctx: "Ctx") -> None:
+    """Edit-time warning for *MAT_SPOTWELD (MAT_100) Card 2 (R16 Vol II
+    p.2-338..2-341): EFAIL NRR NRS NRT MRR MSS MTT NF.  EFAIL is a failure
+    plastic strain (dimensionless) and NF a count, but NRR/NRS/NRT and
+    MRR/MSS/MTT are force/moment resultants for the resultant-based failure
+    surface and STRESSES when the stress-based option is active - a dimension
+    that the fixed table cannot resolve without the option flag.  They are
+    left unscaled and flagged rather than silently scaled as one or the other."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 2:
+        return
+    if any(kf.get_number(data[1], STD8, block.long, fi) for fi in range(1, 7)):
+        ctx.warn(f"*{block.name}: Card 2 failure resultants NRR/NRS/NRT (axial/"
+                 "shear) and MRR/MSS/MTT (moments) are force/moment for the "
+                 "resultant-based failure but stresses for the stress-based "
+                 "option (R16 Vol II p.2-338) - left UNSCALED; scale them "
+                 "manually as force/moment (or stress) to match your option.")
 
 
 def h_section_beam(block: Block, ctx, edit: bool) -> None:
@@ -1653,9 +1804,108 @@ CUSTOM: Dict[str, Callable] = {
 }
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Prefix-router rules.  resolve() first consults the exact-match tables (HARD /
+# CUSTOM / SPEC / WHITELIST) and WHITELIST_PREFIXES; only a name that matches
+# none of those is walked past this ORDERED list, and the FIRST rule whose
+# prefix matches the raw keyword name decides the verdict.  Order is
+# significant - e.g. DATABASE_FREQUENCY_BINARY must be tried before
+# DATABASE_FREQUENCY_, and both before DATABASE_.  To add a keyword family,
+# insert a rule at the correct precedence point; do not reorder existing ones.
+# Each rule is (prefix, resolver) where resolver(name) -> (kind, payload).
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _rule_load_body(name):
+    # GENERALIZED / POROUS / GENERALIZED_SET_NODE... have different layouts
+    # (N1 N2 LCID DRLCID XC YC ZC + accel card) - not modelled
+    if name.rsplit("_", 1)[-1] in ("X", "Y", "Z", "RX", "RY", "RZ"):
+        return "custom", h_load_body
+    return "unknown", None
+
+
+def _rule_prescribed_motion(name):
+    # SET_BOX / SET_EDGE_UVW / SET_FACE_XYZ / SET_LINE / SET_POINT_UVW
+    # insert extra geometry cards the plain layout cannot model
+    if any(t in name for t in ("_BOX", "_EDGE", "_FACE", "_LINE", "_POINT")):
+        return "unknown", None
+    return "custom", h_prescribed_motion
+
+
+def _rule_rigidwall_planar(name):
+    return "custom", h_rigidwall_planar
+
+
+def _rule_contact(name):
+    # families whose card 2/3 layouts differ from the 3D penalty
+    # layout h_contact models must not be routed there
+    # MORTAR contacts use the same 3D penalty-card layout h_contact
+    # models (Cards 1-3 SSID/MSID.., FS FD DC VC.., SFS SFM SST MST..),
+    # only adding optional MPP/advanced cards that h_contact tolerates -
+    # so they are NOT excluded here (R16 Vol I *CONTACT_..._MORTAR).
+    if (name.startswith("CONTACT_TIEBREAK") or "DRAWBEAD" in name
+            or "MPP" in name or "DAMPING" in name
+            or name.startswith("CONTACT_2D") or "ENTITY" in name
+            or "GEBOD" in name or "INTERIOR" in name
+            or "GUIDED_CABLE" in name or "COUPLING" in name
+            or "AUTO_MOVE" in name):
+        return "unknown", None
+    return "custom", h_contact
+
+
+def _rule_database_frequency_binary(name):
+    return "custom", h_database_frequency
+
+
+def _rule_database_frequency(name):
+    return "unknown", None      # ASCII variants: layout not modelled
+
+
+def _rule_database_binary(name):
+    tail = name[len("DATABASE_BINARY_"):]
+    if tail in ("D3DUMP", "RUNRSF", "D3DRLF",   # cycle intervals
+                "D3PROP"):                      # flags only
+        return "white", None
+    if tail in ("D3PLOT", "D3PART", "D3THDT", "INTFOR", "FSIFOR",
+                "BLSTFOR", "D3MEAN"):
+        return "custom", h_database_dt
+    return "unknown", None
+
+
+def _rule_database(name):
+    # only the ASCII output-file keywords have 'DT' as field 0
+    # (R16 Vol I *DATABASE_OPTION table); anything else (e.g.
+    # NODAL_FORCE_GROUP: NSID CID, TRACER: TIME X Y Z) must not have
+    # its first field blindly scaled as a time
+    if name[len("DATABASE_"):] in _DATABASE_ASCII:
+        return "custom", h_database_dt
+    return "unknown", None
+
+
+def _rule_control(name):
+    return "soft", ("not in the dimension table - left unchanged; "
+                    "most CONTROL cards are flags, but verify")
+
+
+_ROUTER_RULES: List[Tuple[str, Callable[[str], Tuple[str, object]]]] = [
+    ("LOAD_BODY_", _rule_load_body),
+    ("BOUNDARY_PRESCRIBED_MOTION", _rule_prescribed_motion),
+    ("RIGIDWALL_PLANAR", _rule_rigidwall_planar),
+    ("CONTACT_", _rule_contact),
+    # DATABASE_ family: most-specific prefix first (see order note above)
+    ("DATABASE_FREQUENCY_BINARY", _rule_database_frequency_binary),
+    ("DATABASE_FREQUENCY_", _rule_database_frequency),
+    ("DATABASE_BINARY_", _rule_database_binary),
+    ("DATABASE_", _rule_database),
+    ("CONTROL_", _rule_control),
+]
+
+
 def resolve(name: str):
     """Classify a keyword. Returns (kind, payload):
-    kind in {spec, custom, white, soft, hard, unknown}."""
+    kind in {spec, custom, white, soft, hard, unknown}.
+
+    Precedence: the exact-match tables and the _TITLE/_ID + _MAT_ALIASES
+    normalisation are consulted first, then the ordered prefix _ROUTER_RULES."""
     base = name
     for opt in ("_TITLE", "_ID"):
         if base.endswith(opt):
@@ -1672,62 +1922,16 @@ def resolve(name: str):
     for p in WHITELIST_PREFIXES:
         if name.startswith(p):
             return "white", None
-    if name.startswith("LOAD_BODY_"):
-        # GENERALIZED / POROUS / GENERALIZED_SET_NODE... have different
-        # layouts (N1 N2 LCID DRLCID XC YC ZC + accel card) - not modelled
-        if name.rsplit("_", 1)[-1] in ("X", "Y", "Z", "RX", "RY", "RZ"):
-            return "custom", h_load_body
-        return "unknown", None
-    if name.startswith("BOUNDARY_PRESCRIBED_MOTION"):
-        # SET_BOX / SET_EDGE_UVW / SET_FACE_XYZ / SET_LINE / SET_POINT_UVW
-        # insert extra geometry cards the plain layout cannot model
-        if any(t in name for t in ("_BOX", "_EDGE", "_FACE", "_LINE",
-                                   "_POINT")):
-            return "unknown", None
-        return "custom", h_prescribed_motion
-    if name.startswith("RIGIDWALL_PLANAR"):
-        return "custom", h_rigidwall_planar
-    if name.startswith("CONTACT_"):
-        # families whose card 2/3 layouts differ from the 3D penalty
-        # layout h_contact models must not be routed there
-        if (name.startswith("CONTACT_TIEBREAK") or "DRAWBEAD" in name
-                or "MPP" in name or "DAMPING" in name or "MORTAR" in name
-                or name.startswith("CONTACT_2D") or "ENTITY" in name
-                or "GEBOD" in name or "INTERIOR" in name
-                or "GUIDED_CABLE" in name or "COUPLING" in name
-                or "AUTO_MOVE" in name):
-            return "unknown", None
-        return "custom", h_contact
-    if name.startswith("DATABASE_FREQUENCY_BINARY"):
-        return "custom", h_database_frequency
-    if name.startswith("DATABASE_FREQUENCY_"):
-        return "unknown", None      # ASCII variants: layout not modelled
-    if name.startswith("DATABASE_BINARY_"):
-        tail = name[len("DATABASE_BINARY_"):]
-        if tail in ("D3DUMP", "RUNRSF", "D3DRLF",   # cycle intervals
-                    "D3PROP"):                      # flags only
-            return "white", None
-        if tail in ("D3PLOT", "D3PART", "D3THDT", "INTFOR", "FSIFOR",
-                    "BLSTFOR", "D3MEAN"):
-            return "custom", h_database_dt
-        return "unknown", None
-    if name.startswith("DATABASE_"):
-        # only the ASCII output-file keywords have 'DT' as field 0
-        # (R16 Vol I *DATABASE_OPTION table); anything else (e.g.
-        # NODAL_FORCE_GROUP: NSID CID, TRACER: TIME X Y Z) must not have
-        # its first field blindly scaled as a time
-        if name[len("DATABASE_"):] in _DATABASE_ASCII:
-            return "custom", h_database_dt
-        return "unknown", None
-    if name.startswith("CONTROL_"):
-        return "soft", ("not in the dimension table - left unchanged; "
-                        "most CONTROL cards are flags, but verify")
+    for prefix, rule in _ROUTER_RULES:
+        if name.startswith(prefix):
+            return rule(name)
     return "unknown", None
 
 
 # scan-time extras for keywords that already have a Spec
 SCAN_EXTRA: Dict[str, Callable] = {
     "MAT_PIECEWISE_LINEAR_PLASTICITY": h_mat_024,
+    "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY": h_mat_024,
     "PART": x_scan_part,
     "PART_INERTIA": x_scan_part,
     "PART_CONTACT": x_scan_part,
@@ -1738,5 +1942,54 @@ EDIT_EXTRA: Dict[str, Callable] = {
     "MAT_ELASTIC_FLUID": x_mat_001,
     "MAT_JOHNSON_COOK": x_mat_015,
     "MAT_POWER_LAW_PLASTICITY": x_mat_018,
+    "MAT_SPOTWELD": x_mat_100,
     "PART_INERTIA": x_part_inertia,
 }
+
+
+def register_keyword(name: str, spec: Optional[Spec] = None, *,
+                     alias: object = None,
+                     scan_extra: Optional[Callable] = None,
+                     edit_extra: Optional[Callable] = None) -> None:
+    """One-stop registration hook for a new table-driven keyword.
+
+    Bundles the steps a new keyword normally needs so future additions have a
+    single obvious entry point instead of touching four module-level dicts by
+    hand:
+
+      * ``spec``       -> installed in ``SPECS`` under ``name`` (the *resolve()*
+                          verdict becomes ("spec", spec));
+      * ``alias``      -> one numeric/short spelling (str) or several (iterable
+                          of str) mapped to ``name`` in ``_MAT_ALIASES`` so
+                          e.g. MAT_024 resolves to the canonical MAT_ name;
+      * ``scan_extra`` -> a scan-time hook added to ``SCAN_EXTRA`` for ``name``;
+      * ``edit_extra`` -> an edit-time hook added to ``EDIT_EXTRA`` for ``name``.
+
+    Every argument except ``name`` is optional, so the helper also serves
+    custom-handler-only keywords (pass ``alias``/extras with no ``spec``).
+    It only mutates the registry dicts - it does not alter resolve()'s
+    precedence, which still consults these dicts in their fixed order.
+    """
+    if spec is not None:
+        SPECS[name] = spec
+    if alias is not None:
+        aliases = (alias,) if isinstance(alias, str) else tuple(alias)
+        for a in aliases:
+            _MAT_ALIASES[a] = name
+    if scan_extra is not None:
+        SCAN_EXTRA[name] = scan_extra
+    if edit_extra is not None:
+        EDIT_EXTRA[name] = edit_extra
+
+
+# ── demonstration: two existing materials wired through register_keyword() ────
+# These produce SPECS / _MAT_ALIASES entries byte-identical to the inline
+# literal forms they replace (verified by comparing registry contents before
+# and after the refactor); they show the intended single-hook registration.
+register_keyword("MAT_NULL",
+                 Spec(cards=[C({1: DENSITY, 2: PRESSURE, 3: VISCOSITY,
+                                6: PRESSURE})], probe={"ro": (0, 1)}),
+                 alias="MAT_009")
+register_keyword("MAT_VACUUM",
+                 Spec(cards=[C({1: DENSITY})], probe={"ro": (0, 1)}),
+                 alias="MAT_140")

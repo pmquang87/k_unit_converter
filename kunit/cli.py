@@ -14,6 +14,7 @@ import json
 import sys
 from pathlib import Path
 
+from . import __version__
 from .convert import ConvertError, convert, inventory, load_tree, report, scan
 from .detect import detect
 from .units import DIM_NAMES, PRESETS, parse_dim_name, parse_system
@@ -219,6 +220,8 @@ def cmd_gui(_args) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="kunit", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version",
+                    version=f"%(prog)s {__version__}")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     p = sub.add_parser("detect", help="auto-detect a deck's unit system")
