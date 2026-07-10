@@ -12,6 +12,12 @@ from fractions import Fraction
 from typing import Dict, List, Optional, Set, Tuple
 
 from .parser import Block, KFile, ParameterFieldError, STD8
+
+try:
+    from .parser import FieldWidthError
+except ImportError:  # parser owner defines this; guard until it lands
+    class FieldWidthError(Exception):  # type: ignore[no-redef]
+        line_idx: int
 from .schema import (CUSTOM, EDIT_EXTRA, SCAN_EXTRA, Spec, _numint,
                      _strip_title, resolve)
 from .units import (ANG_VEL, DIM_NAMES, DIMLESS, Dim, FORCE, LENGTH, MOMENT,
@@ -26,7 +32,7 @@ class Ctx:
     def __init__(self, files: List[KFile], src: Optional[UnitSystem],
                  dst: Optional[UnitSystem], opts: Optional[dict] = None):
         self.files = files
-        self.kf: KFile = files[0] if files else None
+        self.kf: Optional[KFile] = files[0] if files else None
         self.src = src
         self.dst = dst
         self.opts = opts or {}
@@ -366,7 +372,7 @@ def convert(path: str, src: UnitSystem, dst: UnitSystem, out_path: str,
 
     try:
         _walk(ctx, edit=True)                   # pass 2: rewrite fields
-    except ParameterFieldError as e:
+    except (ParameterFieldError, FieldWidthError) as e:
         raise ConvertError(f"{ctx.kf.path}: {e}") from None
     if ctx.errors:
         raise ConvertError("conversion errors:\n  " + "\n  ".join(ctx.errors))
@@ -420,7 +426,16 @@ def convert(path: str, src: UnitSystem, dst: UnitSystem, out_path: str,
             hdr = [f"$ kunit: converted from {src.key} to {dst.key} on {stamp}",
                    f"$ kunit: unit system is now  mass={dst.mass}  "
                    f"length={dst.length}  time={dst.time}"]
-        kf.write(out, extra_header=hdr)
+        # write to a sibling temp file then atomically replace the target,
+        # so a mid-tree failure never leaves a partially-overwritten file
+        tmp = out + ".tmp_kunit"
+        try:
+            kf.write(tmp, extra_header=hdr)
+            os.replace(tmp, out)
+        except BaseException:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            raise
         ctx.written.append((out, bak))
 
     # self-check: the output should auto-detect as the target system from
@@ -496,8 +511,8 @@ def report(ctx: Ctx, src: UnitSystem, dst: UnitSystem) -> str:
     if ctx.factors_used:
         out.append("factors applied:")
         for dim, f in sorted(ctx.factors_used.items(),
-                             key=lambda kv: DIM_NAMES.get(kv[0], "")):
-            out.append(f"  {DIM_NAMES.get(dim, dim):<28} x {float(f):.9G}")
+                             key=lambda kv: str(DIM_NAMES.get(kv[0], ""))):
+            out.append(f"  {str(DIM_NAMES.get(dim, dim)):<28} x {float(f):.9G}")
     out.append("")
     out.append("keywords rescaled:")
     for k, n in sorted(ctx.counts.items()):
