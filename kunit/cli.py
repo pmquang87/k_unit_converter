@@ -72,14 +72,14 @@ def cmd_check(args) -> int:
         kinds[kind].append((name, n))
 
     curves = {}
-    for lcid in sorted(k for k in set(ctx.curve_blocks) | set(ctx.curve_dims)
+    for lcid in sorted(k for k in set(ctx.scan.curve_blocks) | set(ctx.scan.curve_dims)
                        if k is not None):
-        dims = ctx.curve_dims.get(lcid, {})
+        dims = ctx.scan.curve_dims.get(lcid, {})
         demands = [{"x": _dim_label(xd), "y": _dim_label(yd), "by": src}
                    for (xd, yd), src in sorted(dims.items(), key=str)]
         status = ("unresolved" if not dims
                   else "conflict" if len(dims) > 1 else "resolved")
-        curves[lcid] = {"defined": lcid in ctx.curve_blocks,
+        curves[lcid] = {"defined": lcid in ctx.scan.curve_blocks,
                         "status": status, "demands": demands}
 
     hard = {k: v for k, v in ctx.hard.items()}

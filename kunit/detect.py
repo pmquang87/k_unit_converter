@@ -114,8 +114,8 @@ def detect(path: str, follow_includes: bool = True,
 
     # gravity ordinates from *LOAD_BODY curves
     gravities: List[float] = []
-    for lcid in ctx.probes["gravity_lcids"]:
-        for ckf, cb in ctx.curve_blocks.get(lcid, []):
+    for lcid in ctx.scan.probes["gravity_lcids"]:
+        for ckf, cb in ctx.scan.curve_blocks.get(lcid, []):
             data = _strip_title(cb, list(cb.data))
             ords = []
             for li in data[1:]:
@@ -125,7 +125,7 @@ def detect(path: str, follow_includes: bool = True,
             if ords and max(ords) > 0 and min(ords) / max(ords) > 0.99:
                 gravities.append(max(ords))
     # *LOAD_GRAVITY_PART ACCEL values are accelerations near g directly
-    gravities.extend(ctx.probes.get("gravity_accels", []))
+    gravities.extend(ctx.scan.probes.get("gravity_accels", []))
 
     # header comment declaration (main file only). A kunit conversion stamp
     # always beats a generic 'Unit system :' comment - after an in-place
