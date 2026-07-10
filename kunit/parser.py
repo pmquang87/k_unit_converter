@@ -10,7 +10,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import List, Optional, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fractions import Fraction
 
 _ELESS = re.compile(r"^([+-]?(?:\d+\.?\d*|\.\d+))([+-]\d+)$")
 
@@ -36,8 +39,8 @@ def parse_number(token: str) -> Optional[Decimal]:
     return v if v.is_finite() else None
 
 
-def format_fixed(value: Decimal, width: int, pad_right: int = 0):
-    """Shortest float representation of `value` fitting `width` chars.
+def format_fixed(value: Decimal, width: int, pad_right: int = 0) -> Tuple[str, float]:
+    """Most precise decimal representation of `value` that fits `width` chars.
 
     Returns (text, rel_err). pad_right shifts the value left off the field's
     right edge (still spec-conformant for F-fields, which are parsed by
@@ -74,7 +77,10 @@ class Block:
 class KFile:
     def __init__(self, path: str):
         self.path = path
-        with open(path, "r", newline="") as fh:
+        # latin-1 round-trips arbitrary single bytes 1:1 and never raises on
+        # non-ASCII input (µ, °, accents in titles/comments), preserving the
+        # byte-exact guarantee on any platform regardless of default encoding.
+        with open(path, "r", newline="", encoding="latin-1") as fh:
             text = fh.read()
         self.eol = "\r\n" if "\r\n" in text[:20000] else "\n"
         self.lines: List[str] = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
@@ -169,7 +175,7 @@ class KFile:
         self.lines[line_idx] = line[:start] + tv + line[end:]
 
     def scale_field(self, line_idx: int, widths: Sequence[int], long: bool,
-                    fi: int, f, pad_right: int = 0) -> bool:
+                    fi: int, f: "Fraction", pad_right: int = 0) -> bool:
         """Multiply field fi by Fraction f in place. Returns True if changed."""
         from .units import apply_factor
         fl = self.fields(line_idx, widths, long)
@@ -184,10 +190,20 @@ class KFile:
         nv = apply_factor(v, f)
         if self.is_free(line_idx):
             s = f"{float(nv):.9G}"
+            # free-format still loses precision (9 sig-figs); track it in
+            # max_fmt_err too so comma decks are covered by the self-check.
+            fnv = float(nv)
+            if fnv != 0.0:
+                parsed_back = Decimal(s)
+                rel = abs(float(parsed_back) / fnv - 1.0)
+                self.max_fmt_err = max(self.max_fmt_err, rel)
             self.set_field(line_idx, widths, long, fi, s)
         else:
             w = 20 if long else widths[fi]
-            s, rel = format_fixed(nv, w, pad_right)
+            try:
+                s, rel = format_fixed(nv, w, pad_right)
+            except ValueError:
+                raise FieldWidthError(line_idx, nv, w)
             self.max_fmt_err = max(self.max_fmt_err, rel)
             line = self.lines[line_idx]
             start = sum(([20] * len(widths) if long else widths)[:fi])
@@ -208,7 +224,8 @@ class KFile:
                     break
             else:
                 lines = extra_header + lines
-        with open(path, "w", newline="") as fh:
+        # latin-1: mirror the reader so bytes round-trip 1:1 (see __init__).
+        with open(path, "w", newline="", encoding="latin-1") as fh:
             fh.write(self.eol.join(lines) if self.eol != "\n" else "\n".join(lines))
 
 
@@ -217,3 +234,12 @@ class ParameterFieldError(Exception):
         super().__init__(f"line {line_idx + 1}: field {token!r} references a "
                          f"*PARAMETER — cannot scale parametrised values")
         self.line_idx = line_idx
+
+
+class FieldWidthError(Exception):
+    def __init__(self, line_idx: int, value, width: int):
+        super().__init__(f"line {line_idx + 1}: scaled value {value} does not "
+                         f"fit the {width}-char field")
+        self.line_idx = line_idx
+        self.value = value
+        self.width = width

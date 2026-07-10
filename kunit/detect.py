@@ -55,6 +55,23 @@ class Verdict:
         return "\n".join(out)
 
 
+# Unit abbreviations that are also common English words / bare single letters
+# and so appear in header prose ("... units in mm ...") without denoting a
+# unit. When a dimension has a more specific candidate, these lose.
+_AMBIGUOUS_HEADER_UNITS = ("in", "m", "s")
+
+
+def _pick_unit(toks, candidates):
+    """Choose one header token for a dimension, preferring specificity.
+
+    Returns the first candidate token that is not an ambiguous English-word
+    collision; only if every candidate is ambiguous does it fall back to the
+    first one (so a header that really only says 'm' still resolves to m)."""
+    hits = [t for t in toks if t in candidates]
+    return next((t for t in hits if t not in _AMBIGUOUS_HEADER_UNITS),
+                hits[0] if hits else None)
+
+
 def _near(value: float, anchors, tol: float) -> bool:
     return any(abs(value / a - 1.0) <= tol for a in anchors if a)
 
@@ -81,16 +98,13 @@ def detect(path: str, follow_includes: bool = True,
     dets: List[float] = []
     icfd_ros: List[float] = []
     icfd_viss: List[float] = []
-    from .schema import resolve
+    from .schema import resolve, _strip_title
     for kf in files:
         for block in kf.blocks:
             kind, payload = resolve(block.name)
             if kind != "spec" or not payload.probe:
                 continue
-            data = list(block.data)
-            opts = block.name.split("_")
-            if "TITLE" in opts or "ID" in opts:
-                data = data[1:]
+            data = _strip_title(block, list(block.data))
             for key, (ci, fi) in payload.probe.items():
                 if ci < len(data):
                     v = kf.get_number(data[ci], STD8, block.long, fi)
@@ -102,10 +116,7 @@ def detect(path: str, follow_includes: bool = True,
     gravities: List[float] = []
     for lcid in ctx.probes["gravity_lcids"]:
         for ckf, cb in ctx.curve_blocks.get(lcid, []):
-            data = list(cb.data)
-            opts = cb.name.split("_")
-            if "TITLE" in opts or "ID" in opts:
-                data = data[1:]
+            data = _strip_title(cb, list(cb.data))
             ords = []
             for li in data[1:]:
                 v = ckf.get_number(li, (20, 20), cb.long, 1)
@@ -137,11 +148,19 @@ def detect(path: str, follow_includes: bool = True,
                 continue
         if generic_sys is None and _HEADER_RE.search(ln):
             toks = [t.lower() for t in _TOKEN_RE.findall(ln)]
-            m = next((t for t in toks if t in ("kg", "g", "ton", "tonne", "mg",
-                                               "lbm", "lb", "slug", "slinch")), None)
-            l = next((t for t in toks if t in ("mm", "cm", "m", "in", "inch",
-                                               "ft", "foot")), None)
-            t = next((t for t in toks if t in ("s", "sec", "ms", "us", "µs")), None)
+            # Specificity rule: pick each dimension's unit by *specificity*,
+            # not by first appearance. A few abbreviations collide with plain
+            # English words that occur in the header prose itself - "in" the
+            # preposition, and bare "m"/"s". Collect ALL candidate tokens for a
+            # dimension (in header order) and prefer one that is NOT such a
+            # collision. So 'units in mm, kg, ms' resolves length to mm (the
+            # specific unit), not to the "in" that merely precedes it, while
+            # 'Unit system : m, kg, sec' still yields m because m is its only
+            # length candidate.
+            m = _pick_unit(toks, ("kg", "g", "ton", "tonne", "mg",
+                                  "lbm", "lb", "slug", "slinch"))
+            l = _pick_unit(toks, ("mm", "cm", "m", "in", "inch", "ft", "foot"))
+            t = _pick_unit(toks, ("s", "sec", "ms", "us", "µs"))
             if m and l and t:
                 try:
                     generic_sys = parse_system(f"{m}-{l}-{t}")
