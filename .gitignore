@@ -3,3 +3,11 @@
 __pycache__/
 *.pyc
 kunit.egg-info/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
