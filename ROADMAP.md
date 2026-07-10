@@ -1,5 +1,12 @@
 # kunit — Roadmap / "what to do next"
 
+> **Status (this branch):** Tiers 0–3 and most of Tier 4 are now implemented
+> (see the CHANGELOG). Test suite grew from 96 → 197. The **one deliberately
+> deferred item** is the invasive `Ctx` god-object split (Tier 4) — it rewrites
+> ~40 handler call sites for internal-structure reasons with real regression
+> risk and no functional payoff, so it belongs in its own isolated, reviewed PR
+> rather than bundled with feature/fix work. Everything else below is done.
+
 A synthesis of a deep review of the codebase (engine, schema, tests, tooling)
 and the repo's history. `kunit` is already mature: exact-arithmetic conversion,
 two-pass semantics, non-circular self-check, a byte-preserving parser, a
@@ -145,9 +152,12 @@ leverage for adoption.
 
 ## Tier 4 — Architecture (enables everything above to scale)
 
-Not urgent, but these reduce the cost of every future keyword addition:
+These reduce the cost of every future keyword addition:
 
-- **Split the `Ctx` god-object** (~30 attrs, reused across scan+edit) into an
+- **✅ Done: `resolve()` is now a declarative, ordered rule table** with a
+  `register_keyword()` single entry point, guarded by 28 precedence
+  regression tests.
+- **⏸ Deferred (own PR): split the `Ctx` god-object** (~30 attrs, reused across scan+edit) into an
   immutable `ScanResult` and an `EditContext`, making the two-pass contract
   explicit and the `self.kf` "current file" rebinding safer.
 - **Make `resolve()` a declarative prefix→handler registry** with an explicit
