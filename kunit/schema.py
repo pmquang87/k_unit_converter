@@ -528,9 +528,9 @@ def h_define_curve(block: Block, ctx, edit: bool) -> None:
                   "the curve cannot be identified.")
         return
     if not edit:
-        ctx.curve_blocks.setdefault(lcid, []).append((kf, block))
+        ctx.scan.curve_blocks.setdefault(lcid, []).append((kf, block))
         return
-    dims = ctx.curve_dims.get(lcid)
+    dims = ctx.scan.curve_dims.get(lcid)
     if not dims:
         ctx.warn(f"*{block.name} lcid={lcid}: no referencing keyword tells me "
                  "its axis dimensions - data points left UNCHANGED. Use "
@@ -581,7 +581,7 @@ def h_define_table(block: Block, ctx, edit: bool) -> None:
                   "the table cannot be identified.")
         return
     if not edit:
-        ctx.table_blocks[tbid] = (kf, block)
+        ctx.scan.table_blocks[tbid] = (kf, block)
         # 'value, lcid' pair form: second numeric field names the sub-curve
         pairs = []
         for li in data[1:]:
@@ -589,10 +589,10 @@ def h_define_table(block: Block, ctx, edit: bool) -> None:
             sub = parse_number(fl[1][0]) if len(fl) > 1 else None
             if sub:
                 pairs.append(int(sub))
-        ctx.table_pairs[tbid] = pairs
-        ctx.table_nvalues[tbid] = len(data) - 1
+        ctx.scan.table_pairs[tbid] = pairs
+        ctx.scan.table_nvalues[tbid] = len(data) - 1
         return
-    entry = ctx.table_dims.get(tbid)
+    entry = ctx.scan.table_dims.get(tbid)
     if not entry:
         ctx.warn(f"*{block.name} tbid={tbid}: unreferenced - left UNCHANGED.")
         return
@@ -616,10 +616,10 @@ def h_load_body(block: Block, ctx, edit: bool) -> None:
         lciddr = _numint(kf, li, STD8, block.long, 2)   # dyn. relax. curve
         if not edit:
             if lcid:
-                ctx.register_curve(lcid, TIME, ydim, block.name)
-                ctx.probes["gravity_lcids"].append(lcid)
+                ctx.scan.register_curve(lcid, TIME, ydim, block.name)
+                ctx.scan.probes["gravity_lcids"].append(lcid)
             if lciddr:
-                ctx.register_curve(lciddr, TIME, ydim, block.name + " LCIDDR")
+                ctx.scan.register_curve(lciddr, TIME, ydim, block.name + " LCIDDR")
         else:
             for fi in (3, 4, 5):   # XC YC ZC (angular arm point)
                 kf.scale_field(li, STD8, block.long, fi, ctx.fac(LENGTH))
@@ -634,7 +634,7 @@ def h_load_node_or_rb(block: Block, ctx, edit: bool) -> None:
         lcid = _numint(kf, li, STD8, block.long, 2)
         ydim = MOMENT if dof in (5, 6, 7, 8) else FORCE
         if not edit and lcid:
-            ctx.register_curve(lcid, TIME, ydim, block.name)
+            ctx.scan.register_curve(lcid, TIME, ydim, block.name)
     if edit:
         ctx.count(block.name + " (curve-carried)")
 
@@ -662,7 +662,7 @@ def h_prescribed_motion(block: Block, ctx, edit: bool) -> None:
                 continue
         if not edit:
             if lcid:
-                ctx.register_curve(lcid, xdim, ydim, block.name)
+                ctx.scan.register_curve(lcid, xdim, ydim, block.name)
         else:
             kf.scale_field(li, STD8, block.long, 6, ctx.fac(TIME))  # DEATH
             kf.scale_field(li, STD8, block.long, 7, ctx.fac(TIME))  # BIRTH
@@ -720,10 +720,10 @@ def h_mat_024(block: Block, ctx) -> None:
         lcss = _numint(kf, data[1], STD8, block.long, 2)
         lcsr = _numint(kf, data[1], STD8, block.long, 3)
         if lcss:
-            ctx.register_curve(lcss, STRAIN, PRESSURE, "MAT_024 LCSS")
-            ctx.register_table(lcss, RATE, STRAIN, PRESSURE)
+            ctx.scan.register_curve(lcss, STRAIN, PRESSURE, "MAT_024 LCSS")
+            ctx.scan.register_table(lcss, RATE, STRAIN, PRESSURE)
         if lcsr:
-            ctx.register_curve(lcsr, RATE, DIMLESS, "MAT_024 LCSR")
+            ctx.scan.register_curve(lcsr, RATE, DIMLESS, "MAT_024 LCSR")
 
 
 def h_element_sph(block: Block, ctx, edit: bool) -> None:
@@ -858,7 +858,7 @@ def h_section_discrete(block: Block, ctx, edit: bool) -> None:
         secid = _numint(kf, c1, STD8, block.long, 0)
         dro = _numint(kf, c1, STD8, block.long, 1) or 0
         if not edit:
-            ctx.sec_discrete_dro[secid] = dro
+            ctx.scan.sec_discrete_dro[secid] = dro
             continue
         if dro == 0:
             kf.scale_field(c1, STD8, block.long, 3, ctx.fac(VELOCITY))  # V0
@@ -875,7 +875,7 @@ def h_section_discrete(block: Block, ctx, edit: bool) -> None:
 def _smat_torsional(kf, block, ctx) -> bool:
     data = _strip_title(block, list(block.data))
     mid = _numint(kf, data[0], STD8, block.long, 0) if data else None
-    return mid in ctx.torsional_mats
+    return mid in ctx.scan.torsional_mats
 
 
 def h_smat_spring_elastic(block: Block, ctx, edit: bool) -> None:
@@ -884,7 +884,7 @@ def h_smat_spring_elastic(block: Block, ctx, edit: bool) -> None:
     if not data:
         return
     if not edit:
-        ctx.smat_blocks.append((kf, block, "S01"))
+        ctx.scan.smat_blocks.append((kf, block, "S01"))
         return
     dim = MOMENT if _smat_torsional(kf, block, ctx) else STIFF
     kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(dim))
@@ -897,7 +897,7 @@ def h_smat_spring_elastoplastic(block: Block, ctx, edit: bool) -> None:
     if not data:
         return
     if not edit:
-        ctx.smat_blocks.append((kf, block, "S03"))
+        ctx.scan.smat_blocks.append((kf, block, "S03"))
         return
     tors = _smat_torsional(kf, block, ctx)
     kdim = MOMENT if tors else STIFF
@@ -914,7 +914,7 @@ def h_smat_damper_viscous(block: Block, ctx, edit: bool) -> None:
     if not data:
         return
     if not edit:
-        ctx.smat_blocks.append((kf, block, "S02"))
+        ctx.scan.smat_blocks.append((kf, block, "S02"))
         return
     dim = ROT_DAMP if _smat_torsional(kf, block, ctx) else DAMP
     kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(dim))
@@ -926,7 +926,7 @@ def h_smat_curve_mats(block: Block, ctx, edit: bool) -> None:
     dims depend on translational vs torsional, resolved post-scan."""
     if not edit:
         kind = "S05" if "DAMPER" in block.name else "S04"
-        ctx.smat_blocks.append((ctx.kf, block, kind))
+        ctx.scan.smat_blocks.append((ctx.kf, block, kind))
         return
     ctx.count(block.name + " (curve-carried)")
 
@@ -1024,7 +1024,7 @@ def h_lagrange_in_solid(block: Block, ctx, edit: bool) -> None:
         if pfac is not None and pfac < 0:
             lcid = int(-pfac)
             if not edit:
-                ctx.register_curve(lcid, LENGTH, PRESSURE, "CLIS PFAC curve")
+                ctx.scan.register_curve(lcid, LENGTH, PRESSURE, "CLIS PFAC curve")
     if edit:
         if len(data) > 1:
             kf.scale_field(data[1], STD8, block.long, 0, ctx.fac(TIME))
@@ -1061,7 +1061,7 @@ def h_icfd_prescribed_vel(block: Block, ctx, edit: bool) -> None:
             continue
         if not edit:
             if lcid:
-                ctx.register_curve(lcid, TIME, ydim, block.name)
+                ctx.scan.register_curve(lcid, TIME, ydim, block.name)
         else:
             kf.scale_field(li, STD8, block.long, 6, ctx.fac(TIME))  # DEATH
             kf.scale_field(li, STD8, block.long, 7, ctx.fac(TIME))  # BIRTH
@@ -1078,7 +1078,7 @@ def h_icfd_prescribed_pre(block: Block, ctx, edit: bool) -> None:
         lcid = _numint(kf, li, STD8, block.long, 1)
         if not edit:
             if lcid:
-                ctx.register_curve(lcid, TIME, PRESSURE, block.name)
+                ctx.scan.register_curve(lcid, TIME, PRESSURE, block.name)
         else:
             kf.scale_field(li, STD8, block.long, 3, ctx.fac(TIME))  # DEATH
             kf.scale_field(li, STD8, block.long, 4, ctx.fac(TIME))  # BIRTH
@@ -1101,12 +1101,12 @@ def h_icfd_control_time(block: Block, ctx, edit: bool) -> None:
     def timestep_card(li, tfields, lcid_fi, neg_curve):
         lcid = _numint(kf, li, STD8, block.long, lcid_fi)
         if not edit and lcid:
-            ctx.register_curve(lcid, TIME, DIMLESS, block.name + " LCIDSF")
+            ctx.scan.register_curve(lcid, TIME, DIMLESS, block.name + " LCIDSF")
         for fi in tfields:
             v = kf.get_number(li, STD8, block.long, fi)
             if v is not None and v < 0 and fi in neg_curve:
                 if not edit:
-                    ctx.register_curve(int(-v), TIME, TIME,
+                    ctx.scan.register_curve(int(-v), TIME, TIME,
                                        block.name + " DTMIN/DTMAX")
                 continue
             if edit:
@@ -1143,7 +1143,7 @@ def h_mesh_bl(block: Block, ctx, edit: bool) -> None:
                 continue
             if v < 0:
                 if not edit:
-                    ctx.register_curve(int(-v), TIME, dim,
+                    ctx.scan.register_curve(int(-v), TIME, dim,
                                        f"{block.name} (negative field "
                                        f"{fi + 1})")
                 continue
@@ -1311,11 +1311,11 @@ def h_load_gravity_part(block: Block, ctx, edit: bool) -> None:
             for fi in (2, 4):                             # LC, LCDR
                 lcid = _numint(kf, li, STD8, block.long, fi)
                 if lcid:
-                    ctx.register_curve(lcid, TIME, DIMLESS,
+                    ctx.scan.register_curve(lcid, TIME, DIMLESS,
                                        block.name + " factor curve")
             v = kf.get_number(li, STD8, block.long, 3)
             if v:
-                ctx.probes["gravity_accels"].append(abs(float(v)))
+                ctx.scan.probes["gravity_accels"].append(abs(float(v)))
         else:
             kf.scale_field(li, STD8, block.long, 3, ctx.fac(ACCEL))
     if edit:
@@ -1420,7 +1420,7 @@ def h_mat_add_fatigue(block: Block, ctx, edit: bool) -> None:
         lcid = -1                                         # manual default
     if lcid > 0:
         if not edit:
-            ctx.register_curve(lcid, DIMLESS, PRESSURE,
+            ctx.scan.register_curve(lcid, DIMLESS, PRESSURE,
                                block.name + " S-N (cycles vs stress)")
             return
         if len(data) > 1:
@@ -1602,16 +1602,16 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
                 ctx.error(f"*{block.name}: LCTYP={lctyp} is not documented "
                           "(R16 Vol I p.23-65).")
             else:
-                ctx.register_curve(lcdam, xdim, DIMLESS,
+                ctx.scan.register_curve(lcdam, xdim, DIMLESS,
                                    block.name + " LCDAM")
         for li in load_cards:
             ldpsd = _numint(kf, li, STD8, block.long, 3)
             if ldpsd and base is not None:
                 if ldtyp == 0:
-                    ctx.register_curve(ldpsd, FREQ, psd,
+                    ctx.scan.register_curve(ldpsd, FREQ, psd,
                                        block.name + " LDPSD")
                 else:                                      # LDTYP=2: history
-                    ctx.register_curve(ldpsd, TIME, base,
+                    ctx.scan.register_curve(ldpsd, TIME, base,
                                        block.name + " LDPSD (time history)")
             for fi, fname in ((4, "LDVEL"), (5, "LDFLW"), (6, "LDSPN")):
                 sub = _numint(kf, li, STD8, block.long, fi)
@@ -1626,14 +1626,14 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
             ld1 = _numint(kf, li, STD8, block.long, 3)
             ld2 = _numint(kf, li, STD8, block.long, 4)
             if ld1:
-                ctx.register_curve(ld1, FREQ, psd, block.name + " LDPSD1")
+                ctx.scan.register_curve(ld1, FREQ, psd, block.name + " LDPSD1")
             if ld2:
                 ydim = psd if lctyp2 == 0 else DIMLESS     # phase angle
-                ctx.register_curve(ld2, FREQ, ydim, block.name + " LDPSD2")
+                ctx.scan.register_curve(ld2, FREQ, ydim, block.name + " LDPSD2")
         for li in sn_cards:
             sn_lcid = _numint(kf, li, STD8, block.long, 1) or 0
             if sn_lcid > 0:
-                ctx.register_curve(sn_lcid, DIMLESS, PRESSURE,
+                ctx.scan.register_curve(sn_lcid, DIMLESS, PRESSURE,
                                    block.name + " S-N (cycles vs stress)")
         return
 
@@ -1761,7 +1761,7 @@ def x_scan_part(block: Block, ctx) -> None:
         secid = _numint(kf, data[i], STD8, block.long, 1)
         mid = _numint(kf, data[i], STD8, block.long, 2)
         if pid:
-            ctx.part_links.append((pid, secid, mid))
+            ctx.scan.part_links.append((pid, secid, mid))
 
 
 CUSTOM: Dict[str, Callable] = {

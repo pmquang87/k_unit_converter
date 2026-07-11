@@ -28,18 +28,12 @@ class ConvertError(Exception):
     pass
 
 
-class Ctx:
-    def __init__(self, files: List[KFile], src: Optional[UnitSystem],
-                 dst: Optional[UnitSystem], opts: Optional[dict] = None):
-        self.files = files
-        self.kf: Optional[KFile] = files[0] if files else None
-        self.src = src
-        self.dst = dst
-        self.opts = opts or {}
-        self.warnings: List[str] = []
-        self.errors: List[str] = []
-        self.notes: List[str] = []
-        self.counts: Counter = Counter()
+class ScanResult:
+    """Resolved semantics gathered in scan pass 1: curve/table axis
+    dimensions, the blocks that define them, part->section->material links,
+    discrete-material DRO flags, and detection probes."""
+
+    def __init__(self) -> None:
         self.curve_dims: Dict[int, Dict[Tuple, str]] = {}
         self.table_dims: Dict[int, Tuple[Dim, Dim, Dim]] = {}
         self.curve_blocks: Dict[int, List[Tuple[KFile, Block]]] = {}
@@ -53,11 +47,41 @@ class Ctx:
         self.probes: Dict[str, list] = {"ro": [], "e": [], "d": [],
                                         "gravity_lcids": [],
                                         "gravity_accels": []}
+
+    def register_curve(self, lcid: int, xdim, ydim, src: str) -> None:
+        self.curve_dims.setdefault(lcid, {})[(xdim, ydim)] = src
+
+    def register_table(self, tbid: int, vdim, xdim, ydim) -> None:
+        self.table_dims[tbid] = (vdim, xdim, ydim)
+
+
+class Ctx:
+    """Conversion context: composes ``self.scan`` (the ScanResult holding all
+    pass-1 resolved semantics) and holds the factor engine, the current-file
+    ``kf`` pointer, diagnostics, and the edit-pass results."""
+
+    def __init__(self, files: List[KFile], src: Optional[UnitSystem],
+                 dst: Optional[UnitSystem], opts: Optional[dict] = None):
+        # inputs
+        self.files = files
+        self.kf: Optional[KFile] = files[0] if files else None
+        self.src = src
+        self.dst = dst
+        self.opts = opts or {}
+        # pass-1 resolved semantics
+        self.scan = ScanResult()
+        # factor engine
+        self._fac: Dict[Dim, Fraction] = {}
+        self.factors_used: Dict[Dim, Fraction] = {}
+        # diagnostics
+        self.warnings: List[str] = []
+        self.errors: List[str] = []
+        self.notes: List[str] = []
+        self.counts: Counter = Counter()
         self.unknown: Dict[str, int] = {}
         self.soft: Dict[str, str] = {}
         self.hard: Dict[str, str] = {}
-        self._fac: Dict[Dim, Fraction] = {}
-        self.factors_used: Dict[Dim, Fraction] = {}
+        # edit results
         self.written: List[Tuple[str, Optional[str]]] = []  # (out, backup)
         self.self_check: Optional[str] = None
         self.roundtrip: Optional[str] = None
@@ -87,12 +111,6 @@ class Ctx:
 
     def count(self, what: str) -> None:
         self.counts[what] += 1
-
-    def register_curve(self, lcid: int, xdim, ydim, src: str) -> None:
-        self.curve_dims.setdefault(lcid, {})[(xdim, ydim)] = src
-
-    def register_table(self, tbid: int, vdim, xdim, ydim) -> None:
-        self.table_dims[tbid] = (vdim, xdim, ydim)
 
 
 # ── multi-file loading ───────────────────────────────────────────────────────
@@ -195,7 +213,7 @@ def _apply_spec(spec: Spec, block: Block, ctx: Ctx, edit: bool) -> None:
             for li in rows:
                 v = kf.get_number(li, STD8, block.long, fi)
                 if v:
-                    ctx.register_curve(int(v), xdim, ydim, block.name)
+                    ctx.scan.register_curve(int(v), xdim, ydim, block.name)
     if edit and (spec.cards or spec.repeat or spec.group):
         ctx.count(block.name)
 
@@ -235,12 +253,12 @@ def _walk(ctx: Ctx, edit: bool) -> None:
 def _post_scan(ctx: Ctx) -> None:
     # CLI --curve overrides win over anything the scan derived
     for lcid, dims in (ctx.opts.get("curve_overrides") or {}).items():
-        ctx.curve_dims[lcid] = {tuple(dims): "--curve override"}
+        ctx.scan.curve_dims[lcid] = {tuple(dims): "--curve override"}
 
     # discrete materials: translational vs torsional via SECTION_DISCRETE DRO
     mid_dros: Dict[int, Set[int]] = {}
-    for _pid, secid, mid in ctx.part_links:
-        dro = ctx.sec_discrete_dro.get(secid)
+    for _pid, secid, mid in ctx.scan.part_links:
+        dro = ctx.scan.sec_discrete_dro.get(secid)
         if dro is not None and mid:
             mid_dros.setdefault(mid, set()).add(dro)
     for mid, dros in mid_dros.items():
@@ -249,15 +267,15 @@ def _post_scan(ctx: Ctx) -> None:
                      "and torsional parts - treated as TRANSLATIONAL; split "
                      "the material to convert correctly.")
         elif dros == {1}:
-            ctx.torsional_mats.add(mid)
+            ctx.scan.torsional_mats.add(mid)
 
     # spring/damper curve materials: dims depend on the torsional flag
-    for kf, block, kind in ctx.smat_blocks:
+    for kf, block, kind in ctx.scan.smat_blocks:
         data = _strip_title(block, list(block.data))
         if not data:
             continue
         mid = _numint(kf, data[0], STD8, block.long, 0)
-        tors = mid in ctx.torsional_mats
+        tors = mid in ctx.scan.torsional_mats
         xdim = DIMLESS if tors else LENGTH
         ydim = MOMENT if tors else FORCE
         rdim = ANG_VEL if tors else VELOCITY
@@ -265,27 +283,27 @@ def _post_scan(ctx: Ctx) -> None:
             lcd = _numint(kf, data[0], STD8, block.long, 1)
             lcr = _numint(kf, data[0], STD8, block.long, 2)
             if lcd:
-                ctx.register_curve(lcd, xdim, ydim, f"MAT_S04 mid={mid}")
-                ctx.register_table(lcd, rdim, xdim, ydim)
+                ctx.scan.register_curve(lcd, xdim, ydim, f"MAT_S04 mid={mid}")
+                ctx.scan.register_table(lcd, rdim, xdim, ydim)
             if lcr:
-                ctx.register_curve(lcr, rdim, DIMLESS, f"MAT_S04 mid={mid}")
+                ctx.scan.register_curve(lcr, rdim, DIMLESS, f"MAT_S04 mid={mid}")
         elif kind == "S05":
             lcdr = _numint(kf, data[0], STD8, block.long, 1)
             if lcdr:
-                ctx.register_curve(lcdr, rdim, ydim, f"MAT_S05 mid={mid}")
+                ctx.scan.register_curve(lcdr, rdim, ydim, f"MAT_S05 mid={mid}")
 
     # tables: propagate axis dims to their sub-curves
-    for tbid, (vdim, xdim, ydim) in list(ctx.table_dims.items()):
-        pairs = ctx.table_pairs.get(tbid) or []
+    for tbid, (vdim, xdim, ydim) in list(ctx.scan.table_dims.items()):
+        pairs = ctx.scan.table_pairs.get(tbid) or []
         if pairs:
             for lcid in pairs:
-                ctx.register_curve(lcid, xdim, ydim, f"DEFINE_TABLE {tbid}")
+                ctx.scan.register_curve(lcid, xdim, ydim, f"DEFINE_TABLE {tbid}")
             continue
-        loc = ctx.table_blocks.get(tbid)
+        loc = ctx.scan.table_blocks.get(tbid)
         if loc is None:
             continue
         kf, tblock = loc
-        n = ctx.table_nvalues.get(tbid, 0)
+        n = ctx.scan.table_nvalues.get(tbid, 0)
         bi = kf.blocks.index(tblock)
         got = 0
         for b in kf.blocks[bi + 1:]:
@@ -298,7 +316,7 @@ def _post_scan(ctx: Ctx) -> None:
             if bdata:
                 lcid = _numint(kf, bdata[0], STD8, b.long, 0)
                 if lcid:
-                    ctx.register_curve(lcid, xdim, ydim,
+                    ctx.scan.register_curve(lcid, xdim, ydim,
                                        f"DEFINE_TABLE {tbid} sub-curve")
                     got += 1
         if got < n:
