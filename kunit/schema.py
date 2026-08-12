@@ -125,6 +125,10 @@ SPECS: Dict[str, Spec] = {
                C({0: PRESSURE, 1: PRESSURE})],
         curves=[(1, 2, DIMLESS, PRESSURE)]),
     "SECTION_SOLID": Spec(cards=[C()], extra_ok=True),
+    # R16 Vol I p.37-16 (*PART_ADAPTIVE_FAILURE): PID T TERM, one card.  T is
+    # a thickness - "when the thickness of the part reaches this minimum
+    # value, the part is split into two parts".
+    "PART_ADAPTIVE_FAILURE": Spec(cards=[C({1: LENGTH})]),
     # R16 Vol I p.41-52..41-57 (*SECTION_POINT_SOURCE_MIXTURE): Card 1 SECID
     # LCIDT - LCIDVEL NIDLC1-3 IDIR, Card 2 LCMD1-8, then one repeating
     # "Source Node Card" NODEID VECID ORIFA per source node.  ORIFA is "the
@@ -645,6 +649,20 @@ SPECS: Dict[str, Spec] = {
     "DEFINE_CURVE_SMOOTH": Spec(repeat=C(
         {2: LENGTH, 3: TIME, 4: TIME, 5: TIME, 6: VELOCITY})),
 
+    # ── LSO output control (R16 Vol III ch.10) ──────────────────────────────
+    # p.10-7..10-8 (*LSO_POINT_SET): Card 1 SETID USE, then one card per point
+    # holding its X/Y/Z - real model coordinates in both USE branches (fixed
+    # time-history points and tracer seed positions).
+    "LSO_POINT_SET": Spec(cards=[C()],
+                          repeat=C({0: LENGTH, 1: LENGTH, 2: LENGTH})),
+    # p.10-9..10-11 (*LSO_TIME_SEQUENCE): Card 1 is the solver name (free
+    # text), Card 2 DT LCDT LCOPT NPLTC TBEG TEND, then domain-id cards and
+    # global-variable name cards.  Those trailing cards hold ids and names,
+    # and the reader tells them apart by whether the line parses as integers -
+    # so they are tolerated rather than modelled.
+    "LSO_TIME_SEQUENCE": Spec(cards=[C(), C({0: TIME, 4: TIME, 5: TIME})],
+                              curves=[(1, 1, TIME, TIME)], extra_ok=True),
+
     # ── ICFD incompressible-flow solver (R16 Vol III) ───────────────────────
     # R16 Vol III p.7-147..7-149 (*ICFD_MAT): Card1 MID FLG RO VIS ST
     # STSFLCID CA - RO is the flow density, VIS the dynamic viscosity, ST the
@@ -674,6 +692,20 @@ SPECS: Dict[str, Spec] = {
     # not a frequency in Hz.  The generic DATABASE_ fallback in resolve()
     # cannot reach an ICFD_-prefixed name, so it needs its own entry.
     "ICFD_DATABASE_TEMP": Spec(repeat=C({1: TIME})),
+
+    # p.7-87..7-91 (*ICFD_CONTROL_TURBULENCE): Card 1 TMOD SUBMOD WLAW KS CS -
+    # TWLAW TYPLUS.  KS is the "roughness physical height" and the only
+    # dimensional field in the keyword; CS is the roughness constant and
+    # TYPLUS a y+.  The optional model-constant card (its layout depends on
+    # TMOD, and TMOD = 4 spreads it over two lines) holds nothing but
+    # dimensionless closure coefficients.
+    "ICFD_CONTROL_TURBULENCE": Spec(cards=[C({3: LENGTH})], extra_ok=True),
+    # p.7-99..7-102 (*ICFD_DATABASE_FLUX / _SURF): repeating PID DTOUT.  This
+    # entry words DTOUT as "output frequency", but the identical field of the
+    # sibling *ICFD_DATABASE_DRAG is spelled out as "time interval to print
+    # the output", with the same zero-default meaning.
+    "ICFD_DATABASE_FLUX": Spec(repeat=C({1: TIME})),
+    "ICFD_DATABASE_FLUX_SURF": Spec(repeat=C({1: TIME})),
 
     # ── *MESH volume mesher (R16 Vol III) ───────────────────────────────────
     # R16 Vol III p.8-19 (*MESH_SURFACE_NODE) and p.8-9 (*MESH_NODE, which
@@ -793,6 +825,14 @@ WHITELIST = {
     # R16 Vol III p.8-6 (*MESH_BL_SYM): eight surface part ids, no sizing data
     # (unlike *MESH_BL, which is handled by h_mesh_bl).
     "MESH_BL_SYM",
+    # R16 Vol III p.7-80 (*ICFD_CONTROL_SURFMESH): two remeshing flags.
+    "ICFD_CONTROL_SURFMESH",
+    # R16 Vol III p.8-7 (*MESH_EMBEDSHELL): a volume-mesh id plus the part ids
+    # of the shells to embed in it.
+    "MESH_EMBEDSHELL",
+    # R16 Vol III p.10-2..10-4 (*LSO_DOMAIN): a domain-type name, a solver
+    # name, an id/flag card and a list of variable names to output.
+    "LSO_DOMAIN",
 
     # ── structural topology: thick shells, beams, IGA (R16 Vol I) ───────────
     # p.19-5/19-12: Card 1 is EID PID N1 N2 N3 + release codes, Card 8 is the
@@ -813,6 +853,18 @@ WHITELIST = {
     # scaled there); Card 7 (WFL != 0) holds NURBS weights, dimensionless.
     # So the whole patch definition carries no (M,L,T) quantity.
     "ELEMENT_SOLID_NURBS_PATCH",
+    # p.26-3..26-54, the parametric half of the IGA family.  Everything these
+    # carry is an id, a count, a polynomial degree, a knot value or a u/v/w
+    # PARAMETRIC coordinate - Remark 2 on p.26-6 ties (U, V, W) to "the local
+    # r-, s-, t-directions ... in the parametric space", and the tensile-test
+    # deck confirms it: every value sits in [0, 1] while the model spans
+    # +-96 mm.  Control weights are ratios too.  An _XYZ in the name proves
+    # nothing: *IGA_EDGE_XYZ and *IGA_FACE_XYZ hold only ids and orientation
+    # flags, while *IGA_SHELL has no suffix at all and does hide a length.
+    # Exact keys only - *IGA_1D_NURBS_XYZ and the BASIS_TRANSFORM patches
+    # carry real coordinates and stay unknown.
+    "IGA_1D_BREP", "IGA_1D_NURBS_UVW", "IGA_EDGE_UVW", "IGA_EDGE_XYZ",
+    "IGA_FACE_XYZ", "IGA_POINT_UVW",
     # p.29-16..29-17 (*INTEGRATION_SHELL): S is a natural through-thickness
     # coordinate in [-1, 1] and WF the weight dt_i/t, both ratios.  (Do NOT
     # generalise to *INTEGRATION_BEAM: its D1-D6 / SREF / TREF are lengths.)
@@ -1926,6 +1978,142 @@ def h_mat_thermal_isotropic(block: Block, ctx, edit: bool) -> None:
                  "2-card layout left unscaled - the _TD, _TD_LC and "
                  "_PHASE_CHANGE variants are separate keywords; verify.")
     ctx.count(block.name)
+
+
+IGA_W4 = (20,) * 4      # IGA knot / control-point cards: 4 fields x 20 chars
+
+
+def h_iga_2d_nurbs_xyz(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.26-19..26-23 (*IGA_2D_NURBS_XYZ).
+
+    The only bulk geometry in the IGA family: Card 1 PATCHID NR NS PR PS,
+    Card 2 UNIR UNIS, then the r- and s-knot vectors, then NR x NS control
+    points X Y Z WGT on 4 x 20-char cards.  Knots parameterise a reference
+    domain and are dimensionless; the control points are "NONHOMOGENEOUS
+    control point coordinates in the global x-direction", so they are plain
+    lengths and the weights beside them stay untouched (a homogeneous w*x
+    storage would have needed the weights scaled too - R16 does not use one).
+
+    How many knot cards there are depends on UNIR/UNIS: zero means the full
+    vector, ceil((NR + PR + 1) / 4) cards of four values, otherwise a single
+    RFIRST/RLAST card.  Get that wrong and the reader lands mid-knot-vector
+    and starts scaling knots as coordinates, so the control-point count is
+    checked against NR x NS before anything is written.
+    """
+    if not edit:
+        return
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 3:
+        ctx.error(f"*{block.name}: {len(data)} data cards is too few for the "
+                  "patch header (R16 Vol I p.26-19) - refusing.")
+        return
+    nr, ns, pr, ps = (_numint(kf, data[0], STD8, block.long, i) or 0
+                      for i in (1, 2, 3, 4))
+    unir = _numint(kf, data[1], STD8, block.long, 0) or 0
+    unis = _numint(kf, data[1], STD8, block.long, 1) or 0
+    idx = 2
+    idx += -(-(nr + pr + 1) // 4) if unir == 0 else 1
+    idx += -(-(ns + ps + 1) // 4) if unis == 0 else 1
+    points = data[idx:]
+    if len(points) != nr * ns:
+        ctx.error(f"*{block.name}: expected NR*NS = {nr}*{ns} = {nr * ns} "
+                  f"control-point cards after the knot vectors, found "
+                  f"{len(points)} - the card plan was misread, refusing to "
+                  "scale anything.")
+        return
+    for li in points:
+        for fi in range(3):                                 # X Y Z (not WGT)
+            kf.scale_field(li, IGA_W4, block.long, fi, ctx.fac(LENGTH))
+    ctx.count(block.name)
+
+
+def h_iga_shell(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.26-61 (*IGA_SHELL): SID PID NISR NISS RID - IDFNE.
+
+    NISR/NISS change dimension with their sign - "LT.0.0: |NISR| is the
+    AVERAGE EDGE LENGTH of the interpolation elements in the local
+    r-direction", while zero and positive values are counts that must stay
+    integral.  The keyword name carries no _XYZ/_UVW hint, which makes this
+    the easiest length in the family to miss.
+    """
+    if not edit:
+        return
+    kf = ctx.kf
+    for li in block.data:
+        for fi in (2, 3):
+            v = kf.get_number(li, STD8, block.long, fi)
+            if v is not None and v < 0:
+                kf.scale_field(li, STD8, block.long, fi, ctx.fac(LENGTH))
+    ctx.count(block.name)
+
+
+def h_section_iga_shell(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.41-42..41-45 (*SECTION_IGA_SHELL).
+
+    Repeating card SETS, "for each isogeometric shell section include one set
+    of data cards": Card 1 SECID ELFORM SHRF NIP IRL QR/IRID ICOMP, Card 2
+    with the shell thickness T in its first column, and - only when
+    ICOMP = 1 - ceil(NIP/8) cards of ply angles in degrees.
+
+    Two easy mistakes this avoids: there is exactly ONE thickness here, not
+    the four nodal thicknesses of *SECTION_SHELL; and NLOC (Card 2 field 5)
+    is a multiplier on the thickness, not an offset length - Remark 5 gives
+    offset = -0.5 * NLOC * (average shell thickness), so scaling it would
+    apply the length factor twice.
+    """
+    if not edit:
+        return
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    i = 0
+    while i + 1 < len(data):
+        nip = int(kf.get_number(data[i], STD8, block.long, 3) or 0)
+        icomp = _numint(kf, data[i], STD8, block.long, 6) or 0
+        kf.scale_field(data[i + 1], STD8, block.long, 0, ctx.fac(LENGTH))
+        i += 2
+        if icomp == 1:
+            i += -(-nip // 8)
+    if i != len(data):
+        ctx.warn(f"*{block.name}: {len(data) - i} trailing card(s) left "
+                 "unscaled - the card sets did not add up; verify manually.")
+    ctx.count(block.name)
+
+
+def h_icfd_conj_heat(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol III p.7-6 (*ICFD_BOUNDARY_CONJ_HEAT): repeating PID CTYPE VAL
+    SFLCID.
+
+    CTYPE decides what VAL is: with the default constraint approach it is an
+    "optional temperature drop" (a temperature, never rescaled), with the
+    Mortar-contact approach (CTYPE = 1) it is the "interface heat transfer
+    coefficient" - HEAT_FLUX.  R16 defines no other value, so anything else
+    is refused rather than guessed at.
+
+    SFLCID is a "load curve ID used to describe scale factor on VAL value as
+    a function of time": a dimensionless multiplier, all the units stay in
+    VAL.
+    """
+    kf = ctx.kf
+    for li in block.data:
+        ctype = _numint(kf, li, STD8, block.long, 1) or 0
+        if ctype not in (0, 1):
+            ctx.error(f"*{block.name}: CTYPE={ctype} is not one of the two "
+                      "values R16 Vol III p.7-6 defines, so what VAL means "
+                      "is unknown - convert this boundary manually.")
+            return
+        if not edit:
+            lcid = _numint(kf, li, STD8, block.long, 3)
+            if lcid:
+                ctx.register_curve(lcid, TIME, DIMLESS,
+                                   block.name + " scale factor(time)")
+        elif ctype == 1:
+            kf.scale_field(li, STD8, block.long, 2, ctx.fac(HEAT_FLUX))
+        elif kf.get_number(li, STD8, block.long, 2):
+            ctx.note(f"*{block.name}: temperature field left unchanged "
+                     "(temperatures are never rescaled)")
+    if edit:
+        ctx.count(block.name)
 
 
 def h_mat_fabric(block: Block, ctx, edit: bool) -> None:
@@ -4388,6 +4576,10 @@ CUSTOM: Dict[str, Callable] = {
     "MAT_SPOTWELD": h_mat_spotweld,
     "MAT_THERMAL_ISOTROPIC": h_mat_thermal_isotropic,
     "MAT_GAS_MIXTURE": h_mat_gas_mixture,
+    "ICFD_BOUNDARY_CONJ_HEAT": h_icfd_conj_heat,
+    "IGA_2D_NURBS_XYZ": h_iga_2d_nurbs_xyz,
+    "IGA_SHELL": h_iga_shell,
+    "SECTION_IGA_SHELL": h_section_iga_shell,
     "MAT_FABRIC": h_mat_fabric,
     "MAT_ENHANCED_COMPOSITE_DAMAGE": h_mat_enhanced_composite_damage,
     "MAT_SIMPLIFIED_RUBBER/FOAM": h_mat_simplified_rubber_foam,

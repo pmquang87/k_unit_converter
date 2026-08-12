@@ -2027,3 +2027,191 @@ class ConstraintContactTests(unittest.TestCase):
         p = _write(deck)
         with self.assertRaises(ConvertError):
             convert(p, self.SLIN, TON, p + ".o.k", self_check=False)
+
+
+class IgaTests(unittest.TestCase):
+    """Isogeometric keywords (R16 Vol I ch.26 and p.41-42).  kg-mm-ms ->
+    kg-m-s so the LENGTH factor is 1/1000 and a missed control point shows."""
+
+    KGM = parse_system("kg-m-s")
+
+    def _conv(self, deck, **kw):
+        p = _write(deck)
+        out = p + ".o.k"
+        ctx = convert(p, KGMM, self.KGM, out, self_check=False, **kw)
+        return _lines(out), ctx
+
+    def _patch(self, nr=3, ns=2, pr=1, ps=1, unir=0, unis=0, points=None):
+        # knot counts: nr+pr+1 = 5 -> 2 cards of four, ns+ps+1 = 4 -> 1 card
+        head = ("*IGA_2D_NURBS_XYZ\n" + F(1, nr, ns, pr, ps) + "\n"
+                + F(unir, unis) + "\n")
+        if unir == 0:
+            head += (F("0.0", "0.0", "1.0", "1.0", w=20) + "\n"
+                     + F("1.0", "0.0", "0.0", "0.0", w=20) + "\n")
+        else:
+            head += F("0.0", "1.0", w=20) + "\n"
+        if unis == 0:
+            head += F("0.0", "0.0", "1.0", "1.0", w=20) + "\n"
+        else:
+            head += F("0.0", "1.0", w=20) + "\n"
+        pts = points if points is not None else nr * ns
+        for k in range(pts):
+            head += F("%.1f" % (k * 10.0), "-24.0", "0.0", "0.7071068",
+                      w=20) + "\n"
+        return "*KEYWORD\n" + head + "*END\n"
+
+    def test_iga_control_points_are_lengths_weights_are_not(self):
+        lines, ctx = self._conv(self._patch())
+        i = lines.index("*IGA_2D_NURBS_XYZ")
+        first = i + 6            # 1 header + 2 cards + 2 r-knots + 1 s-knot
+        self.assertAlmostEqual(float(lines[first][0:20]), 0.0)
+        self.assertAlmostEqual(float(lines[first][20:40]), -0.024)
+        self.assertAlmostEqual(float(lines[first][60:80]), 0.7071068)
+        last = i + 6 + 5
+        self.assertAlmostEqual(float(lines[last][0:20]), 0.05)
+
+    def test_iga_uniform_knots_shift_the_control_points(self):
+        # UNIR != 0 replaces the two r-knot cards with a single RFIRST/RLAST
+        lines, ctx = self._conv(self._patch(unir=1))
+        i = lines.index("*IGA_2D_NURBS_XYZ")
+        first = i + 5
+        self.assertAlmostEqual(float(lines[first][20:40]), -0.024)
+
+    def test_iga_control_point_count_mismatch_refused(self):
+        p = _write(self._patch(points=5))
+        with self.assertRaisesRegex(ConvertError, "control-point"):
+            convert(p, KGMM, self.KGM, p + ".o.k", self_check=False)
+
+    def test_iga_shell_negative_nisr_is_a_length(self):
+        deck = ("*KEYWORD\n*IGA_SHELL\n"
+                + F(1, 1, -2.5, 0.0, 0, 0, 0, 0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*IGA_SHELL")
+        self.assertAlmostEqual(float(lines[i + 1][20:30]), -0.0025)
+        self.assertAlmostEqual(float(lines[i + 1][30:40]), 0.0)
+
+    def test_iga_shell_positive_nisr_is_a_count(self):
+        deck = ("*KEYWORD\n*IGA_SHELL\n"
+                + F(1, 1, 3.0, 4.0, 0, 0, 0, 0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*IGA_SHELL")
+        self.assertAlmostEqual(float(lines[i + 1][20:30]), 3.0)
+        self.assertAlmostEqual(float(lines[i + 1][30:40]), 4.0)
+
+    def test_section_iga_shell_thickness_and_nloc(self):
+        deck = ("*KEYWORD\n*SECTION_IGA_SHELL\n"
+                + F(1, 3, 0.833, 5, 0, 0.0, 0) + "\n"
+                + F(2.0, "", "", "", 0.5) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*SECTION_IGA_SHELL")
+        self.assertAlmostEqual(float(lines[i + 2][0:10]), 0.002)   # T
+        self.assertAlmostEqual(float(lines[i + 2][40:50]), 0.5)    # NLOC stays
+        self.assertEqual(ctx.warnings, [])
+
+    def test_section_iga_shell_composite_card_set(self):
+        # ICOMP = 1 pulls in ceil(NIP/8) angle cards before the next section
+        deck = ("*KEYWORD\n*SECTION_IGA_SHELL\n"
+                + F(1, 3, 0.833, 9, 0, 0.0, 1) + "\n"
+                + F(2.0, "", "", "", 0.0) + "\n"
+                + F(0, 15, 30, 45, 60, 75, 90, 0) + "\n"
+                + F(0.0) + "\n"
+                + F(2, 3, 0.833, 2, 0, 0.0, 0) + "\n"
+                + F(4.0, "", "", "", 0.0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*SECTION_IGA_SHELL")
+        self.assertAlmostEqual(float(lines[i + 2][0:10]), 0.002)
+        self.assertAlmostEqual(float(lines[i + 3][10:20]), 15.0)   # angle stays
+        self.assertAlmostEqual(float(lines[i + 6][0:10]), 0.004)   # 2nd section
+        self.assertEqual(ctx.warnings, [])
+
+
+class IcfdLsoTests(unittest.TestCase):
+    """*ICFD_BOUNDARY_CONJ_HEAT, *ICFD_CONTROL_TURBULENCE,
+    *ICFD_DATABASE_FLUX and the *LSO_* output family (R16 Vol III p.7-6,
+    p.7-87, p.7-101, ch.10), kg-m-s -> ton-mm-s."""
+
+    def _conv(self, deck, **kw):
+        p = _write(deck)
+        out = p + ".o.k"
+        ctx = convert(p, SI, TON, out, self_check=False, **kw)
+        return _lines(out), ctx
+
+    def test_conj_heat_ctype0_val_is_a_temperature(self):
+        deck = ("*KEYWORD\n*ICFD_BOUNDARY_CONJ_HEAT\n"
+                + F(43, 0, 5.0, 0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*ICFD_BOUNDARY_CONJ_HEAT")
+        self.assertAlmostEqual(float(lines[i + 1][20:30]), 5.0)
+
+    def test_conj_heat_ctype1_val_is_a_coefficient(self):
+        deck = ("*KEYWORD\n*ICFD_BOUNDARY_CONJ_HEAT\n"
+                + F(43, 1, 1000.0, 0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*ICFD_BOUNDARY_CONJ_HEAT")
+        self.assertAlmostEqual(float(lines[i + 1][20:30]), 1.0)
+
+    def test_conj_heat_unknown_ctype_refused(self):
+        deck = ("*KEYWORD\n*ICFD_BOUNDARY_CONJ_HEAT\n"
+                + F(43, 2, 1000.0, 0) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "CTYPE=2"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
+
+    def test_icfd_turbulence_roughness_height(self):
+        deck = ("*KEYWORD\n*ICFD_CONTROL_TURBULENCE\n"
+                + F(2, 1, 1, 0.002, 0.5, "", 0, 0.0) + "\n"
+                + F(0.2) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*ICFD_CONTROL_TURBULENCE")
+        self.assertAlmostEqual(float(lines[i + 1][30:40]), 2.0)   # KS
+        self.assertAlmostEqual(float(lines[i + 1][40:50]), 0.5)   # CS stays
+        self.assertAlmostEqual(float(lines[i + 2][0:10]), 0.2)    # model const
+        self.assertEqual(ctx.warnings, [])
+
+    def test_icfd_database_flux_dtout(self):
+        deck = ("*KEYWORD\n*ICFD_DATABASE_FLUX\n"
+                + F(1, 0.01) + "\n" + F(2, 0.0) + "\n*END\n")
+        lines, ctx = self._conv(deck)   # kg-m-s -> ton-mm-s leaves time alone
+        i = lines.index("*ICFD_DATABASE_FLUX")
+        self.assertAlmostEqual(float(lines[i + 1][10:20]), 0.01)
+        p = _write(deck)
+        out = p + ".o2.k"
+        convert(p, SI, KGMM, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*ICFD_DATABASE_FLUX")
+        self.assertAlmostEqual(float(lines[i + 1][10:20]), 10.0)
+
+    def test_lso_point_set_coordinates(self):
+        deck = ("*KEYWORD\n*LSO_POINT_SET\n" + F(42, 1) + "\n"
+                + F(1.5886, -0.4722, 1.0965) + "\n"
+                + F(1.6090, -0.4714, 1.0966) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*LSO_POINT_SET")
+        self.assertAlmostEqual(float(lines[i + 2][0:10]), 1588.6)
+        self.assertAlmostEqual(float(lines[i + 3][20:30]), 1096.6)
+
+    def test_lso_time_sequence_times(self):
+        deck = ("*KEYWORD\n*LSO_TIME_SEQUENCE\nICFD\n"
+                + F(0.01, 0, 1, 0, 0.5, 2.0) + "\n"
+                + F(142) + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, SI, KGMM, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*LSO_TIME_SEQUENCE")
+        self.assertEqual(lines[i + 1], "ICFD")            # name card untouched
+        self.assertAlmostEqual(float(lines[i + 2][0:10]), 10.0)    # DT
+        self.assertAlmostEqual(float(lines[i + 2][40:50]), 500.0)  # TBEG
+        self.assertAlmostEqual(float(lines[i + 2][50:60]), 2000.0)  # TEND
+        self.assertEqual(int(lines[i + 3][0:10]), 142)     # domain id
+
+    def test_part_adaptive_failure_thickness(self):
+        deck = ("*KEYWORD\n*PART_ADAPTIVE_FAILURE\n"
+                + F(4, 0.1, 0) + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, KGMM, TON, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*PART_ADAPTIVE_FAILURE")
+        self.assertAlmostEqual(float(lines[i + 1][10:20]), 0.1)   # mm -> mm
+        self.assertEqual(int(lines[i + 1][20:30]), 0)             # TERM flag
