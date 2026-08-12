@@ -3575,12 +3575,20 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
     All frequencies are model-unit cycles/time (the companion output card
     *DATABASE_FREQUENCY_BINARY documents FMIN/FMAX as "cycles/time", R16
     Vol I p.16-98, and Remark 7 p.23-76 defines acceleration as
-    [length]/[time]^2 for UNIT=0).  UNIT != 0 declares g-based PSD input;
-    the manual does not define what frequency unit those g^2/Hz ordinates
-    are per when the model time unit is not the second, so it is refused.
-    VAFLAG 4-7 (shock/progressive/reverberant/TBL waves) add an optional
-    PREF card and phase-velocity/decay curves that are not modelled; LDTYP=1
-    (SPL in dB) references an SI-flavoured default PREF - both refused."""
+    [length]/[time]^2 for UNIT=0).
+
+    UNIT != 0 does two things at once: it puts the acceleration input in g,
+    AND it declares the unit system used for everything else - 1 = kg-m-s,
+    2 = slinch-in-s, 3 = kg-mm-ms, 4 = ton-mm-s (p.23-66..67), the same four
+    systems as the acoustic BEM IUNITS flag.  So the PSD ordinate is g^2 per
+    frequency, carrying no mass or length exponent, and the flag itself is a
+    declaration that has to be REWRITTEN for the destination rather than
+    scaled.  UNIT = -1 keeps its own UMLT multiplier, which is a genuine
+    acceleration and converts.
+
+    VAFLAG 5-7 read LDFLW/LDSPN, whose ordinate the manual never defines, and
+    VAFLAG 4 is not modelled; LDTYP=1 (SPL in dB) references an SI-flavoured
+    default PREF - all refused."""
     kf = ctx.kf
     data = list(block.data)
     fatigue = "FATIGUE" in block.name.split("_")
@@ -3603,24 +3611,30 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
     f7 = _numint(kf, c3, STD8, block.long, 7)              # NCPSD | legacy NFTG
     ldtyp = iv(c4, 0)
 
-    if vaflag in (4, 5, 6, 7):
-        ctx.error(f"*{block.name}: VAFLAG={vaflag} (shock/progressive/"
-                  "reverberant/TBL wave loading) is not modelled - it adds "
-                  "an optional PREF card (changing the card layout) and "
-                  "phase-velocity / decay curves (LDVEL/LDFLW/LDSPN) - "
-                  "convert manually.")
+    if vaflag in (5, 6, 7):
+        ctx.error(f"*{block.name}: VAFLAG={vaflag} (progressive/reverberant/"
+                  "turbulent-boundary-layer wave loading) reads LDFLW and "
+                  "LDSPN on Card 5, and R16 Vol I p.23-70 documents them only "
+                  "as 'load curve for exponential decay for TBL in flow-wise "
+                  "/ span-wise direction'. The decay equation appears nowhere "
+                  "in Vol I-III or the theory manual, so the ordinate could "
+                  "be a length, a 1/length or a pure number - convert "
+                  "manually. (Card 3.1 PREF, which these VAFLAGs also add, is "
+                  "a plain pressure and its presence is decidable from the "
+                  "card count; it is not what blocks the conversion.)")
+        return
+    if vaflag == 4:
+        ctx.error(f"*{block.name}: VAFLAG=4 (shock wave loading) is not "
+                  "modelled - convert manually.")
         return
     if vaflag not in _RV_BASE_DIM:
         ctx.error(f"*{block.name}: VAFLAG={vaflag} is not documented "
                   "(R16 Vol I p.23-66) - refusing to guess.")
         return
-    if unit != 0:
-        ctx.error(f"*{block.name}: UNIT={unit} declares g-based acceleration "
-                  "input (R16 Vol I p.23-66..67); the manual does not define "
-                  "which frequency unit the g^2-per-frequency PSD ordinates "
-                  "are per when the model time unit is not the second, so "
-                  "the PSD curve cannot be rescaled safely - use model "
-                  "units (UNIT=0) or convert manually.")
+    if unit not in (0, -1) and unit not in BEM_UNIT_SYSTEMS:
+        ctx.error(f"*{block.name}: UNIT={unit} is not a documented value "
+                  "(-1, 0, 1-4 - R16 Vol I p.23-66..67) - refusing to guess "
+                  "what unit system the acceleration input declares.")
         return
     if ldtyp == 1:
         ctx.error(f"*{block.name}: LDTYP=1 (SPL input in dB) depends on a "
@@ -3637,6 +3651,15 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
                           or (f7 or 0) < 0 or bool(num(c4, 4)))
     base = _RV_BASE_DIM[vaflag]
     psd = _RV_PSD_DIM.get(base)
+    if unit != 0:
+        # UNIT != 0 declares that the acceleration input is expressed in g -
+        # a fixed physical constant, "1g = 9.81 m/s^2 = 386.089 inch/s^2"
+        # (Remark 7, p.23-76) - so the PSD ordinate is g^2 per frequency and
+        # carries NO mass or length exponent at all.  All that is left of it
+        # is the "per frequency", i.e. a TIME.  Registering ACCEL_PSD here
+        # instead would multiply a 0.01 g^2/Hz spectrum by 645.16 on an
+        # inch -> mm conversion.
+        base, psd = DIMLESS, TIME
 
     # ── card-count plan ──────────────────────────────────────────────────
     load_cards = data[4:4 + napsd]
@@ -3732,6 +3755,36 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
         return
 
     # ── edit pass: rescale fields ────────────────────────────────────────
+    if unit == -1:
+        # "1g = UMLT x [length unit]/[time unit]^2" (Remark 7, p.23-76): the
+        # multiplier IS an acceleration in model units, so it converts.
+        kf.scale_field(c3, STD8, block.long, 3, ctx.fac(ACCEL))    # UMLT
+    elif unit != 0:
+        # UNIT does not merely say "g-based": each value names the unit system
+        # used for everything else (p.23-66..67), exactly like the acoustic
+        # BEM IUNITS flag - so it is a declaration that the conversion makes
+        # false and it has to be rewritten, not scaled.
+        declared = BEM_UNIT_SYSTEMS[unit]
+        if ctx.src is not None and declared != ctx.src:
+            ctx.warn(f"*{block.name}: UNIT={unit} declares {declared.key} but "
+                     f"the deck is being converted as {ctx.src.key} - the "
+                     "flag and the model units disagree in the SOURCE deck; "
+                     "the values are scaled as MODEL units and UNIT is "
+                     "rewritten. Verify.")
+        new_unit = BEM_UNITS.get((ctx.dst.mass, ctx.dst.length, ctx.dst.time))
+        if new_unit is None:
+            supported = ", ".join(f"{v}={s.key}"
+                                  for v, s in sorted(BEM_UNIT_SYSTEMS.items()))
+            ctx.error(f"*{block.name}: UNIT={unit} declares the unit system "
+                      "the g-based acceleration input goes with, but the UNIT "
+                      f"table (R16 Vol I p.23-66..67) has no value for "
+                      f"{ctx.dst.key}. Supported destinations: {supported}. "
+                      "Pick one of those, or rewrite the deck with UNIT=-1 "
+                      "and an explicit UMLT.")
+            return
+        w = 20 if block.long else 10
+        kf.set_field(c3, STD8, block.long, 2, str(new_unit).rjust(w))
+        ctx.count(block.name + f" (UNIT->{new_unit})")
     for fi in (2, 3):                                      # FNMIN FNMAX
         kf.scale_field(c1, STD8, block.long, fi, ctx.fac(FREQ))
     kf.scale_field(c2, STD8, block.long, 3, ctx.fac(FREQ))  # DMPMAS (alpha)

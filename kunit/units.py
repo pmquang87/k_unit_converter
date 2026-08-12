@@ -292,6 +292,11 @@ CSCM_UNIT_SYSTEMS = {v: UnitSystem(*k) for k, v in CSCM_UNITS.items()}
 #   EQ.0: do not apply a unit change     EQ.1: MKS (kg, m, s, N, Pa)
 #   EQ.2: lbf*s^2/in, inch, s, lbf, psi  EQ.3: kg, mm, ms, kN, GPa
 #   EQ.4: ton, mm, s, N, MPa
+# The same four systems, in the same order, are the UNIT flag of
+# *FREQUENCY_DOMAIN_RANDOM_VIBRATION Card 3 and of
+# *FREQUENCY_DOMAIN_ACCELERATION_UNIT (R16 Vol I p.23-66..67, p.23-2), where
+# they declare the units used "elsewhere" alongside g-based acceleration - so
+# this table is shared by both keywords.
 BEM_UNITS: Dict[Tuple[str, str, str], int] = {
     ("kg", "m", "s"): 1,
     ("slinch", "in", "s"): 2,

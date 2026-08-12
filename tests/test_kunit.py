@@ -1492,18 +1492,72 @@ class RandomFatigueTests(unittest.TestCase):
         self.assertAlmostEqual(float(lines[cs[3] + 2][20:40]), 400.0)
         self.assertTrue(ctx.roundtrip.startswith("OK"), ctx.roundtrip)
 
-    def test_freq_rv_unit_flag_refused(self):
-        deck = ("*KEYWORD\n*FREQUENCY_DOMAIN_RANDOM_VIBRATION\n"
-                + F(1, 10, 0.0, 100.0, 0) + "\n"
+    # UNIT != 0 puts the acceleration input in g AND declares the unit system
+    # everything else uses (R16 Vol I p.23-66..67): 1 = kg-m-s, 2 = slinch-in-s,
+    # 3 = kg-mm-ms, 4 = ton-mm-s.  A 0.01 g^2/Hz flat spectrum from 20 to
+    # 2000 Hz is the textbook MIL-STD input and must survive an in -> mm
+    # conversion untouched, with only the flag rewritten.
+    def _rv_g(self, unit, umlt=0.0):
+        return ("*KEYWORD\n*FREQUENCY_DOMAIN_RANDOM_VIBRATION\n"
+                + F(1, 10, 0.0, 2000.0, 0) + "\n"
                 + F(0.02, 0, 0, 0.0, 0.0, 0) + "\n"
-                + F(1, 1, 1, 9.81, 0, 0, 1, 0) + "\n"          # UNIT=1
+                + F(1, 1, unit, umlt, 0, 0, 1, 0) + "\n"
                 + F(0, 0, 0, 0.0, "", 0, 0, 0.1) + "\n"
                 + F(0, 0, 2, 11, 0, 0, 0, 0) + "\n"
-                "*DEFINE_CURVE\n" + F(11, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
-                + F("0.1", w=20) + F("0.2", w=20) + "\n*END\n")
-        p = _write(deck)
-        with self.assertRaisesRegex(ConvertError, "UNIT=1"):
-            convert(p, KGMM, TON, p + ".o.k", self_check=False)
+                "*DEFINE_CURVE\n" + F(11, 0, 1.0, 0.01, 0.0, 0.0, 0, 0) + "\n"
+                + F("20.0", w=20) + F("1.0", w=20) + "\n"
+                + F("2000.0", w=20) + F("1.0", w=20) + "\n*END\n")
+
+    def test_freq_rv_unit_flag_remapped(self):
+        SLIN = parse_system("slinch-in-s")
+        p = _write(self._rv_g(2))
+        out = p + ".o.k"
+        ctx = convert(p, SLIN, TON, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*FREQUENCY_DOMAIN_RANDOM_VIBRATION")
+        self.assertEqual(int(lines[i + 3][20:30]), 4)          # UNIT 2 -> 4
+        self.assertAlmostEqual(float(lines[i + 1][30:40]), 2000.0)   # FNMAX
+        j = lines.index(F(11, 0, 1.0, 0.01, 0.0, 0.0, 0, 0))
+        self.assertAlmostEqual(float(lines[j + 1][0:20]), 20.0)
+        self.assertAlmostEqual(float(lines[j + 1][20:40]), 1.0)
+        self.assertAlmostEqual(float(lines[j + 2][0:20]), 2000.0)
+        self.assertEqual(ctx.warnings, [])
+
+    def test_freq_rv_unit_flag_time_unit_change(self):
+        # UNIT=3 declares ms, so the g^2-per-frequency ordinate really does
+        # move: 20 cycles/ms is 20 kHz, and 1 g^2 per (cycle/ms) is
+        # 0.001 g^2/Hz.  The g^2 part stays length-free throughout.
+        p = _write(self._rv_g(3))
+        out = p + ".o.k"
+        convert(p, KGMM, TON, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*FREQUENCY_DOMAIN_RANDOM_VIBRATION")
+        self.assertEqual(int(lines[i + 3][20:30]), 4)
+        j = lines.index(F(11, 0, 1.0, 0.01, 0.0, 0.0, 0, 0))
+        self.assertAlmostEqual(float(lines[j + 1][0:20]), 20000.0)
+        self.assertAlmostEqual(float(lines[j + 1][20:40]), 0.001)
+
+    def test_freq_rv_unit_flag_contradicts_the_model_units(self):
+        p = _write(self._rv_g(1))            # says kg-m-s, converted as kg-mm-ms
+        ctx = convert(p, KGMM, TON, p + ".o.k", self_check=False)
+        self.assertTrue(any("declares kg-m-s" in w for w in ctx.warnings),
+                        ctx.warnings)
+
+    def test_freq_rv_unit_flag_unmappable_target_refused(self):
+        p = _write(self._rv_g(1))
+        with self.assertRaisesRegex(ConvertError, "no value for g-cm-us"):
+            convert(p, parse_system("kg-m-s"), parse_system("g-cm-us"),
+                    p + ".o.k", self_check=False)
+
+    def test_freq_rv_unit_minus_one_scales_umlt(self):
+        # UMLT converts g to [length]/[time]^2, so it is a real acceleration
+        p = _write(self._rv_g(-1, 9806.65))
+        out = p + ".o.k"
+        convert(p, KGMM, TON, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*FREQUENCY_DOMAIN_RANDOM_VIBRATION")
+        self.assertEqual(int(lines[i + 3][20:30]), -1)         # flag kept
+        self.assertAlmostEqual(float(lines[i + 3][30:40]) / 9.80665e9, 1.0)
 
     def test_freq_rv_wave_vaflag_refused(self):
         deck = ("*KEYWORD\n*FREQUENCY_DOMAIN_RANDOM_VIBRATION\n"
