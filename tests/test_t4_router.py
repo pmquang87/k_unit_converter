@@ -21,7 +21,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kunit.schema import (
     resolve, SPECS, CUSTOM, HARD_FLAGS,
-    h_contact, h_load_body, h_prescribed_motion, h_rigidwall_planar,
+    h_contact, h_contact_2d, h_load_body, h_prescribed_motion,
+    h_rigidwall_planar,
     h_rigidwall_geometric,
     h_database_dt, h_database_frequency, h_mat_cscm, h_define_table,
     h_define_curve,
@@ -99,7 +100,11 @@ class RouterVerdictTests(unittest.TestCase):
                   "CONTACT_DRAWBEAD_BENDING",
                   "CONTACT_DRAWBEAD_INITIALIZE",
                   "CONTACT_AUTOMATIC_SINGLE_SURFACE_DAMPING",
-                  "CONTACT_2D_AUTOMATIC_SURFACE_TO_SURFACE",
+                  # *CONTACT_2D has three groups with different card tables;
+                  # only AUTOMATIC / FORCE_TRANSDUCER is modelled
+                  "CONTACT_2D_SLIDING_ONLY", "CONTACT_2D_TIED_SLIDING",
+                  "CONTACT_2D_PENALTY", "CONTACT_2D_NODE_TO_SOLID",
+                  "CONTACT_2D_AUTOMATIC_SINGLE_SURFACE_THERMAL",
                   "CONTACT_ENTITY", "CONTACT_GEBOD_LOWER",
                   "CONTACT_INTERIOR", "CONTACT_GUIDED_CABLE",
                   "CONTACT_COUPLING", "CONTACT_AUTO_MOVE"):
@@ -112,6 +117,18 @@ class RouterVerdictTests(unittest.TestCase):
             kind, payload = resolve(n)
             self.assertEqual(kind, "custom", n)
             self.assertIs(payload, h_contact, n)
+
+    def test_contact_2d_automatic_group_has_its_own_handler(self):
+        # the 2D cards are not the 3D cards - routing them to h_contact is
+        # what put DC_FRIC on SOA and PRESSURE on SOB
+        for n in ("CONTACT_2D_AUTOMATIC_SINGLE_SURFACE",
+                  "CONTACT_2D_AUTOMATIC_SINGLE_SURFACE_TITLE",
+                  "CONTACT_2D_AUTOMATIC_SURFACE_TO_SURFACE",
+                  "CONTACT_2D_AUTOMATIC_SINGLE_SURFACE_MORTAR",
+                  "CONTACT_2D_FORCE_TRANSDUCER"):
+            kind, payload = resolve(n)
+            self.assertEqual(kind, "custom", n)
+            self.assertIs(payload, h_contact_2d, n)
 
     # ── LOAD_BODY_ family ───────────────────────────────────────────────────
     def test_load_body_custom(self):

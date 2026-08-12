@@ -1152,6 +1152,66 @@ def h_prescribed_motion(block: Block, ctx, edit: bool) -> None:
         ctx.count(block.name)
 
 
+def h_contact_2d(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.11-196..11-199, the *CONTACT_2D_[AUTOMATIC &
+    FORCE_TRANSDUCER] group.  Its cards look nothing like the 3D penalty
+    contact h_contact models, which is exactly why routing them there
+    corrupted introduction/self-piercing-riveting: the 3D Card 2 map put
+    DC_FRIC on SOA and PRESSURE on SOB, turning 1.0/1.0 into 0.001/1000.
+
+    Card 1 SURFA SURFB SFACT FREQ FS FD DC - two set ids, a penalty-stiffness
+    scale factor, a bucket-sort interval in CYCLES, the two friction
+    coefficients and DC, the "exponential decay coefficient" of
+    mu = FD + (FS - FD) exp(-DC |v_rel|), whose exponent forces 1/velocity.
+    Card 2 TBIRTH TDEATH SOA SOB NDA NDB COF INIT.
+
+    Two sign-overloaded traps:
+
+    * SOA/SOB are "surface offset from midline": "GT.0.0: Scale factor applied
+      to actual thickness" but "LT.0.0: Absolute value is used as the offset",
+      so the same column is a ratio or a LENGTH depending on its sign.
+    * TDEATH = -9999 makes TBIRTH "the curve ID defining multiple pairs of
+      birth-time/death-time" instead of a time.  Scaling a curve id would be
+      silent corruption, so that pair is registered as a curve and left
+      alone; any other negative TDEATH still means |TDEATH| is a real time.
+
+    Only Cards 1-2 are modelled.  Optional Card 4 opens with VC, a stress
+    ("the suggested value for VC is to use the yield stress in shear",
+    p.11-201), so a deck that carries it is refused rather than written out
+    with VC still in the source system.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 2:
+        ctx.error(f"*{block.name}: expected Cards 1-2 (SURFA..DC and "
+                  f"TBIRTH..INIT, R16 Vol I p.11-196), found {len(data)}.")
+        return
+    if len(data) > 2:
+        ctx.error(f"*{block.name}: {len(data) - 2} optional card(s) beyond "
+                  "Card 2 are not modelled, and the first of them opens with "
+                  "VC - a stress (R16 Vol I p.11-201) - so they cannot be "
+                  "left unscaled. Convert this 2D contact manually.")
+        return
+    tdeath = kf.get_number(data[1], STD8, block.long, 1)
+    birth_is_curve = tdeath is not None and tdeath == -9999
+    if not edit:
+        if birth_is_curve:
+            lcid = _numint(kf, data[1], STD8, block.long, 0)
+            if lcid:
+                ctx.scan.register_curve(lcid, TIME, TIME,
+                                        block.name + " birth/death pairs")
+        return
+    kf.scale_field(data[0], STD8, block.long, 6, ctx.fac(DC_FRIC))      # DC
+    if not birth_is_curve:
+        kf.scale_field(data[1], STD8, block.long, 0, ctx.fac(TIME))     # TBIRTH
+        kf.scale_field(data[1], STD8, block.long, 1, ctx.fac(TIME))     # TDEATH
+    for fi, nm in ((2, "SOA"), (3, "SOB")):
+        v = kf.get_number(data[1], STD8, block.long, fi)
+        if v is not None and v < 0:        # negative = an absolute offset
+            kf.scale_field(data[1], STD8, block.long, fi, ctx.fac(LENGTH))
+    ctx.count(block.name)
+
+
 def h_contact(block: Block, ctx, edit: bool) -> None:
     """*CONTACT_... mandatory Cards 1-3 plus Optional Cards A and B.
 
@@ -4736,6 +4796,21 @@ def _rule_rigidwall_planar(name):
     return "custom", h_rigidwall_planar
 
 
+def _rule_contact_2d(name):
+    # R16 Vol I p.11-187..11-201 splits *CONTACT_2D into three groups with
+    # DIFFERENT card tables.  Only the AUTOMATIC / FORCE_TRANSDUCER group
+    # (p.11-196) is modelled; the DYNA2D-derived SLIDING / TIED / PENALTY
+    # group opens Card 1 with SURFA SURFB TBIRTH TDEATH instead (p.11-190),
+    # and the SPH NODE_TO_SOLID group is different again.  THERMAL adds a
+    # conductivity/HTC card, as in 3D.
+    if "THERMAL" in name:
+        return "unknown", None
+    tail = name[len("CONTACT_2D_"):]
+    if tail.startswith("AUTOMATIC") or tail.startswith("FORCE_TRANSDUCER"):
+        return "custom", h_contact_2d
+    return "unknown", None
+
+
 def _rule_contact(name):
     # families whose card 2/3 layouts differ from the 3D penalty
     # layout h_contact models must not be routed there.
@@ -4754,7 +4829,7 @@ def _rule_contact(name):
             or "DAMPING" in name or "THERMAL" in name
             or ("DRAWBEAD" in name
                 and ("BENDING" in name or "INITIALIZE" in name))
-            or name.startswith("CONTACT_2D") or "ENTITY" in name
+            or "ENTITY" in name
             or "GEBOD" in name or "INTERIOR" in name
             or "GUIDED_CABLE" in name or "COUPLING" in name
             or "AUTO_MOVE" in name):
@@ -4817,6 +4892,7 @@ _ROUTER_RULES: List[Tuple[str, Callable[[str], Tuple[str, object]]]] = [
     ("BOUNDARY_PRESCRIBED_MOTION", _rule_prescribed_motion),
     ("RIGIDWALL_PLANAR", _rule_rigidwall_planar),
     ("RIGIDWALL_GEOMETRIC", _rule_rigidwall_geometric),
+    ("CONTACT_2D_", _rule_contact_2d),      # before the general CONTACT_ rule
     ("CONTACT_", _rule_contact),
     ("FREQUENCY_DOMAIN_ACOUSTIC_BEM", _rule_freq_acoustic_bem),
     ("FREQUENCY_DOMAIN_ACOUSTIC_FEM", _rule_freq_acoustic_fem),

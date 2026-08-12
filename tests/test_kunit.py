@@ -2314,3 +2314,75 @@ class BoltPreloadTests(unittest.TestCase):
         ctx = convert(p, KGMM, TON, p + ".o.k", self_check=False)
         self.assertFalse(any("unreferenced" in w or "no referencing" in w
                              for w in ctx.warnings), ctx.warnings)
+
+
+class Contact2DTests(unittest.TestCase):
+    """*CONTACT_2D_AUTOMATIC_* (R16 Vol I p.11-196..11-199).
+
+    Regression guard: these cards were being routed to the 3D h_contact,
+    whose Card 2 map put DC_FRIC on SOA and PRESSURE on SOB - silently
+    turning the 1.0 / 1.0 of introduction/self-piercing-riveting into
+    0.001 / 1000."""
+
+    def _deck(self, card2, title=True):
+        head = "*CONTACT_2D_AUTOMATIC_SINGLE_SURFACE_TITLE\nAll to all\n" \
+            if title else "*CONTACT_2D_AUTOMATIC_SINGLE_SURFACE\n"
+        return ("*KEYWORD\n" + head
+                + F(1, 0, 1.0, 50, 0.2, 0.0, 0.01) + "\n" + card2 + "\n*END\n")
+
+    def test_positive_soa_sob_are_thickness_factors(self):
+        # the exact shape self-piercing-riveting writes
+        deck = self._deck(F(0.0, "1.00000E20", 1.0, 1.0, 0, 0, 0, 0))
+        p = _write(deck)
+        out = p + ".o.k"
+        ctx = convert(p, KGMM, TON, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*CONTACT_2D_AUTOMATIC_SINGLE_SURFACE_TITLE")
+        c1, c2 = lines[i + 2], lines[i + 3]
+        self.assertAlmostEqual(float(c1[20:30]), 1.0)        # SFACT factor
+        self.assertEqual(int(c1[30:40]), 50)                 # FREQ in cycles
+        self.assertAlmostEqual(float(c1[40:50]), 0.2)        # FS
+        self.assertAlmostEqual(float(c2[20:30]), 1.0)        # SOA UNCHANGED
+        self.assertAlmostEqual(float(c2[30:40]), 1.0)        # SOB UNCHANGED
+        self.assertAlmostEqual(float(c2[1 * 10:20]), 1.0e17)  # TDEATH ms -> s
+        self.assertEqual(ctx.unknown, {})
+
+    def test_negative_soa_is_an_absolute_offset(self):
+        deck = self._deck(F(0.0, 100.0, -2.5, -2.5, 0, 0, 0, 0))
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, SI, TON, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*CONTACT_2D_AUTOMATIC_SINGLE_SURFACE_TITLE")
+        c1, c2 = lines[i + 2], lines[i + 3]
+        # DC is the exponent of exp(-DC |v_rel|), so it is a 1/velocity
+        self.assertAlmostEqual(float(c1[60:70]), 1.0e-5)
+        self.assertAlmostEqual(float(c2[20:30]), -2500.0)    # SOA m -> mm
+        self.assertAlmostEqual(float(c2[30:40]), -2500.0)    # SOB m -> mm
+
+    def test_tdeath_minus_9999_makes_tbirth_a_curve_id(self):
+        deck = self._deck(F(77, -9999, 1.0, 1.0, 0, 0, 0, 0))
+        deck = deck.replace("*END",
+                            "*DEFINE_CURVE\n"
+                            + F(77, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                            + F("1.0", "2.0", w=20) + "\n*END")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, KGMM, TON, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*CONTACT_2D_AUTOMATIC_SINGLE_SURFACE_TITLE")
+        c2 = lines[i + 3]
+        self.assertEqual(int(c2[0:10]), 77)                  # id, not a time
+        self.assertEqual(int(c2[10:20]), -9999)              # sentinel kept
+        j = lines.index(F(77, 0, 1.0, 1.0, 0.0, 0.0, 0, 0))
+        # both axes of the birth/death pair curve are times
+        self.assertAlmostEqual(float(lines[j + 1][0:20]), 1.0e-3)
+        self.assertAlmostEqual(float(lines[j + 1][20:40]), 2.0e-3)
+
+    def test_optional_card_refused(self):
+        # Optional Card 4 opens with VC, a stress - it cannot be left alone
+        deck = self._deck(F(0.0, 100.0, 1.0, 1.0, 0, 0, 0, 0))
+        deck = deck.replace("*END", F("1.0E8", 10.0, 0, 0) + "\n*END")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "VC"):
+            convert(p, SI, TON, p + ".o.k", self_check=False)
