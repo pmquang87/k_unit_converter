@@ -1646,6 +1646,19 @@ class RandomFatigueTests(unittest.TestCase):
         self.assertEqual(int(lines[i + 6][30:40]), 2001)       # Card 5 LDPSD
         self.assertFalse(any("PREF" in x for x in ctx.warnings), ctx.warnings)
 
+    def test_freq_rv_napsd_zero_takes_the_documented_default(self):
+        # Every LSTC example deck writes NAPSD=0 and still supplies one
+        # Card 5; p.23-66 gives the default as 1 and LS-PrePost rewrites the
+        # 0 as 1.  Reading it as "no load cards" loses the whole Card 5.
+        deck = self._rv_tbl().replace(F(7, 0, 0, 0.0, 0, 0, 1, 0),
+                                      F(7, 0, 0, 0.0, 0, 0, 0, 0))
+        lines, ctx = self._conv_tbl(deck)
+        cs = [i for i, l in enumerate(lines) if l == "*DEFINE_CURVE"]
+        self.assertAlmostEqual(float(lines[cs[1] + 2][20:40]), 3497.0 * 25.4)
+        self.assertAlmostEqual(float(lines[cs[2] + 2][20:40]), 2.613 * 25.4)
+        self.assertFalse(any("unreferenced" in w for w in ctx.warnings),
+                         ctx.warnings)
+
     def test_freq_rv_wave_card_count_refused(self):
         # one card too many: neither the with-PREF nor the without-PREF
         # reading fits, so the block must be refused rather than guessed at

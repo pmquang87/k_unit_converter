@@ -3744,8 +3744,15 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
 
     vaflag = iv(c3, 0)
     unit = iv(c3, 2)
+    # NAPSD's default is 1 (p.23-66) and a WRITTEN 0 takes that default too:
+    # the LSTC example decks (dynaexamples 6.1, 6.4, 6.5) all write NAPSD = 0
+    # and still supply one Card 5, and LS-PrePost rewrites the 0 as 1 when it
+    # round-trips them.  Zero auto-PSD cards cannot be meant in any case - the
+    # block would then define a random vibration analysis with no excitation,
+    # and Remark 14 (p.23-78) has the cross-PSD ids refer to "the ordering
+    # numbers by which the auto PSDs are defined".
     napsd_raw = _numint(kf, c3, STD8, block.long, 6)
-    napsd = 1 if napsd_raw is None else max(napsd_raw, 0)  # default 1
+    napsd = 1 if not napsd_raw else max(napsd_raw, 0)      # default 1
     f7 = _numint(kf, c3, STD8, block.long, 7)              # NCPSD | legacy NFTG
 
     if vaflag == 4:
