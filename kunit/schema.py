@@ -3706,24 +3706,38 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
         LDSPN    / span-wise direction" (p.23-70): LENGTHs.
 
     No LS-DYNA manual (Vol I-III or theory, R11 through R17) states the decay
-    equation, so LDFLW/LDSPN were pinned from the LSTC example decks that use
-    them - curves 2001-2004 of dynaexamples.com example 6.4/6.5 ("6.4.tbl.-
-    psd.k", slinch-in-s, 19 one-third-octave points each).  Read as the
-    streamwise and lateral correlation lengths of the Efimtsov turbulent-
-    boundary-layer model,
-        G(xi, eta, w) = P(w) exp(-|xi| / L1) exp(-|eta| / L3) exp(-i w xi/Uc)
-        L / d = [(a w d / Uc)^2 + b^2 / (Sh^2 + (b/c)^2)]^(-1/2),  Sh = w d/ut
-    the deck's (LDVEL, LDFLW, LDSPN) triple is reproduced to 0.02 % RMS by a
-    single boundary layer, d = 4.26 in and ut = 339 in/s (ut/Uc = 0.043), on
-    which the fitted flow-wise and span-wise decay constants come out at
-    a = 0.1000 and 0.7710 against Efimtsov's published 0.10 and 0.77.  That
-    only balances dimensionally if LDFLW/LDSPN are lengths in model length
-    units and LDVEL is a velocity in model velocity units.  Reading them
-    instead as dimensionless decay coefficients, or as 1/length decay rates,
-    fits the same model at 89 % and 72 % RMS and demands ut = 500 m/s -
-    faster than the convection velocity it is a small fraction of.  Either
-    also makes the flow-wise decay 7.6x FASTER than the span-wise one, which
-    is backwards for every TBL model: eddies stay coherent along the flow.
+    equation.  It is in the paper the feature comes from - Remark 1 (p.23-75)
+    credits Boeing's N-FEARA, and Rassaian, Lee, Arakawa and Huang,
+    "Structural Analysis with Vibro-Acoustic Loads in LS-DYNA", 10th Intl.
+    LS-DYNA Users Conference 2008, p.8-48 Eq.(10), gives the cross-spectrum
+    used for "partially correlated and uncorrelated acoustic wave (plane
+    wave, progressive wave, turbulent boundary layer)":
+        C(xi, eta, w) = G(w) exp(-xi/Lxi - eta/Leta - i w xi/Uxi - i w eta/Ueta)
+    with "Lxi, Leta [the] correlation scale along xi and eta".  A correlation
+    SCALE divided into a separation is a LENGTH, so LDFLW = Lxi and
+    LDSPN = Leta are lengths and LDVEL = U is a velocity.  Corcos is the
+    special case Lxi = Uc/(a1 w), Leta = Uc/(a2 w); LS-DYNA integrates the
+    tabulated curves and does not assume it.
+
+    Cross-checked three ways on the example decks' own curves 2001-2004
+    (dynaexamples 6.4/6.5, slinch-in-s, 19 one-third-octave points), whose
+    "$ rlam:"/"$ slam:" comments are r-lambda and s-lambda of that equation:
+    (a) fitting the Efimtsov TBL model, which predicts exactly these two
+    frequency-dependent correlation lengths, reproduces the deck's (LDVEL,
+    LDFLW, LDSPN) triple to 0.02 % RMS on one boundary layer - d = 4.26 in,
+    u_tau = 339 in/s, u_tau/Uc = 0.043 - with the fitted flow-wise and
+    span-wise constants landing on Efimtsov's published 0.10 and 0.77;
+    (b) reading the ordinates instead as dimensionless decay coefficients or
+    as 1/length decay rates fits that model at 89 % and 72 % RMS and needs a
+    friction velocity faster than the convection velocity it is a fraction
+    of; (c) either alternative puts the flow-wise decay 7.6x FASTER than the
+    span-wise one, backwards for every TBL model - eddies stay coherent along
+    the flow, so Lxi >> Leta (2.613 in against 0.3885 in here).
+
+    PREF is a pressure and enters squared: the same paper's Eq.(12) hard-codes
+    G(f) = 8.41E-18 x 10^(SPL/10) / df for its imperial decks, and 8.41E-18 is
+    (20 uPa in psi)^2 to four figures.  Its printed Type "I" (p.23-67) is a
+    manual typo - the default 2.e-5 in the same column is not an integer.
 
     VAFLAG 4 is not modelled; LDTYP=1 (SPL in dB) rides on a reference
     pressure that only VAFLAG 5-7 can state - both refused."""
@@ -4005,12 +4019,16 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
         # never sees PREF - stays exact.
         f = float(ctx.fac(PRESSURE))
         ctx.warn(f"*{block.name}: VAFLAG={vaflag} but Card 3.1 is absent, so "
-                 "LS-DYNA uses its built-in PREF = 2.0E-5 (R16 Vol I "
-                 "p.23-67) - a bare number in model pressure units that this "
-                 "conversion cannot reach. The random-vibration response is "
-                 "unaffected (PREF only sets the dB reference), but SPL "
-                 f"output shifts by {20.0 * math.log10(f):+.1f} dB. Add Card "
-                 f"3.1 with PREF = {2.0e-5 * f:.5E} to keep the dB scale.")
+                 "LS-DYNA falls back to its built-in PREF = 2.0E-5 (R16 Vol I "
+                 "p.23-67), a bare number the manual attaches to no unit - "
+                 "nothing in the deck holds it and the conversion cannot "
+                 "reach it. PREF only sets the dB reference, so the "
+                 "random-vibration response is unaffected; the SPL output is "
+                 f"not, and shifts by {20.0 * math.log10(f):+.1f} dB. State "
+                 f"Card 3.1 to fix the scale: PREF = {2.0e-5 * f:.5E} "
+                 "reproduces the source deck's dB numbers (its 2.0E-5 read as "
+                 "a model-unit pressure); if the acoustic 20 uPa was meant, "
+                 "write that instead, in the target's pressure unit.")
     for fi in (2, 3):                                      # FNMIN FNMAX
         kf.scale_field(c1, STD8, block.long, fi, ctx.fac(FREQ))
     kf.scale_field(c2, STD8, block.long, 3, ctx.fac(FREQ))  # DMPMAS (alpha)
