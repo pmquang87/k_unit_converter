@@ -24,13 +24,14 @@ if TYPE_CHECKING:
     # imported for handler type annotations only; convert.py imports schema.py
     # at runtime, so importing it here would create a circular import.
     from .convert import Ctx
-from .units import (ACCEL, ACCEL_PSD, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC,
+from .units import (ACCEL, ACCEL_PSD, ACOUST_IMP, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC,
                     DENSITY, Dim, DIM_NAMES, DIMLESS, DISP_PSD, FORCE,
-                    FORCE_PSD, FREQ, INERTIA, L4, LENGTH,
-                    MASS, MASS_AREA, MASS_LEN, MOMENT, PRES_PSD, PRESSURE,
-                    PWR_VOL, RATE,
+                    FORCE_PSD, FREQ, INERTIA, INV_PRESSURE, L4, LENGTH,
+                    MASS, MASS_AREA, MASS_LEN, MOMENT, POWER, PRES_PSD,
+                    PRESSURE, PWR_VOL, RATE,
                     ROT_DAMP, SPEC_HEAT, STIFF, STIFF_LEN, STRESS_M3, TEMP,
                     THERM_COND, TIME, VEL_PSD, VELOCITY, VISCOSITY, VOLUME,
+                    BEM_UNITS, BEM_UNIT_SYSTEMS,
                     BLAST_BUILTIN_UNITS, BLAST_UNIT_SYSTEMS, CSCM_UNITS,
                     CSCM_UNIT_SYSTEMS, blast_unit5_factors)
 
@@ -59,6 +60,7 @@ C = Card
 NODE_W = (8, 16, 16, 16, 8, 8)
 EMASS_W = (8, 8, 16, 8)
 CURVE_W = (20, 20)
+EOS_TAB_W = (16,) * 5   # *EOS_TABULATED data cards: 5 values over 10 slots
 
 SPECS: Dict[str, Spec] = {
     # ── mesh / mass ─────────────────────────────────────────────────────────
@@ -224,28 +226,6 @@ SPECS: Dict[str, Spec] = {
         C({1: DENSITY, 2: PRESSURE}),
         C({0: PRESSURE, 1: PRESSURE, 5: PRESSURE, 6: PRESSURE})],
         probe={"ro": (0, 1), "e": (0, 2)}, extra_ok=True),
-    # R16 Vol II p.2-338..2-341 (*MAT_SPOTWELD / MAT_100): Card1 MID RO E PR
-    # SIGY ET DT TFAIL - E/SIGY/ET stresses, DT (mass-scaling time step) and
-    # TFAIL (failure time) are times.  The Card2 failure resultants
-    # NRR/NRS/NRT/MRR/MSS/MTT are force/moment for the resultant-based failure
-    # but stresses for the stress-based option, so they are NOT scaled by this
-    # Spec - x_mat_100 (EDIT_EXTRA) warns about them instead of guessing.
-    "MAT_SPOTWELD": Spec(cards=[
-        C({1: DENSITY, 2: PRESSURE, 4: PRESSURE, 5: PRESSURE, 6: TIME,
-           7: TIME})],
-        probe={"ro": (0, 1), "e": (0, 2)}, extra_ok=True),
-    # R16 Vol II p.2-241..2-244 (*MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY /
-    # MAT_123): Card1 MID RO E PR SIGY ETAN FAIL TDEL is field-for-field the
-    # MAT_024 layout (E/SIGY/ETAN stresses, FAIL a failure plastic strain,
-    # TDEL a minimum deletion time step); Card2 C P LCSS LCSR VP EPSTHIN
-    # EPSMAJ NUMINT (C the Cowper-Symonds strain-rate coefficient); Cards 3/4
-    # the EPS/ES stress-strain points.  LCSS/LCSR are registered by h_mat_024.
-    "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY": Spec(cards=[
-        C({1: DENSITY, 2: PRESSURE, 4: PRESSURE, 5: PRESSURE, 7: TIME}),
-        C({0: RATE}),
-        C(),
-        C({i: PRESSURE for i in range(8)})],
-        probe={"ro": (0, 1), "e": (0, 2)}),
     # R16 Vol II p.2-289..2-290 (*MAT_CRUSHABLE_FOAM / MAT_063): Card1 MID RO E
     # PR LCID TSC DAMP - E the Young's modulus and TSC the tension stress
     # cutoff (both stresses); LCID is yield stress vs volumetric strain
@@ -286,7 +266,136 @@ SPECS: Dict[str, Spec] = {
         C({2: PRESSURE}),
         C({0: PRESSURE, 1: PRESSURE, 2: PRESSURE, 5: PRESSURE, 6: VISCOSITY,
            7: TIME})], extra_ok=True),
+    # R16 Vol II p.2-139..2-140 + R17 Vol II p.2-146..2-147
+    # (*MAT_ADD_THERMAL_EXPANSION): ID LCID MULT LCIDY MULTY LCIDZ MULTZ TREF.
+    # MULT/MULTY/MULTZ are either a scale factor on the curve or - when the
+    # matching LCID is 0 - the constant expansion coefficient alpha itself.
+    # alpha has units 1/temperature and kunit factors temperature out of the
+    # (M,L,T) signature, so BOTH readings are dimensionless and no
+    # flag-dependence arises.  TREF (R17 only, but already written by R16-era
+    # decks) is a reference temperature.  Net effect: nothing is rescaled;
+    # the entry exists so the three curves get an explicit "leave alone"
+    # classification instead of surfacing as unresolved.
+    # (If kunit ever gains real temperature conversion, which is affine, the
+    # MULT fields and the curve ordinates all need a 1/temperature factor.)
+    "MAT_ADD_THERMAL_EXPANSION": Spec(
+        cards=[C({7: TEMP})],
+        curves=[(0, 1, DIMLESS, DIMLESS), (0, 3, DIMLESS, DIMLESS),
+                (0, 5, DIMLESS, DIMLESS)]),
+    # R16 Vol II p.2-149..2-155 (*MAT_ANISOTROPIC_ELASTIC / MAT_002 ANISO
+    # option, "5 cards follow"): Card 1b.1 MID RO C11 C12 C22 C13 C23 C33;
+    # Card 1b.2 C14 C24 C34 C44 C15 C25 C35 C45; Card 1b.3 C55 C16 C26 C36
+    # C46 C56 C66 AOPT.  Every Cij is a term of the 6x6 constitutive matrix
+    # relating stress to (dimensionless) strain, so all 21 are stresses.
+    # Card 2 XP YP ZP A1 A2 A3 MACF IHIS - only XP/YP/ZP are coordinates, the
+    # a-vector components are a direction.  Card 3 V1 V2 V3 D1 D2 D3 BETA REF
+    # is direction vectors, an angle in degrees and a flag - listed with an
+    # empty map so the trailing-card warning does not fire.
+    # NOTE: bare *MAT_002 is the ORTHO option with a different 4-card layout
+    # and must NOT be aliased here.
+    "MAT_ANISOTROPIC_ELASTIC": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 3: PRESSURE, 4: PRESSURE, 5: PRESSURE,
+           6: PRESSURE, 7: PRESSURE}),
+        C({i: PRESSURE for i in range(8)}),
+        C({i: PRESSURE for i in range(7)}),
+        C({0: LENGTH, 1: LENGTH, 2: LENGTH}),
+        C()],
+        probe={"ro": (0, 1)}),
+    # R16 Vol II p.2-183..2-188 (*MAT_ELASTIC_PLASTIC_HYDRO / MAT_010): the
+    # base option is 5 cards (Card 2 exists if and only if the SPALL option
+    # is used).  Card 1 MID RO G SIG0 EH PC FS CHARL - G shear modulus, SIG0
+    # yield stress, EH plastic hardening modulus and PC the (<= 0) pressure
+    # cutoff are all stresses, FS an erosion strain, CHARL the characteristic
+    # element thickness for deletion.  Cards 3/4 are EPS1..EPS16 (effective
+    # plastic strains, dimensionless) and Cards 5/6 ES1..ES16 (effective
+    # stresses).  The pressure branch comes from the companion *EOS.
+    # No density probe on purpose: a hydro material always shares its RO with
+    # the plasticity/EOS material beside it, so the duplicate evidence only
+    # dilutes the discriminating modulus evidence - it pushed the Taylor-test
+    # decks over the ambiguity threshold in the corpus.
+    "MAT_ELASTIC_PLASTIC_HYDRO": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 3: PRESSURE, 4: PRESSURE, 5: PRESSURE,
+           7: LENGTH}),
+        C(), C(),
+        C({i: PRESSURE for i in range(8)}),
+        C({i: PRESSURE for i in range(8)})]),
+    # R16 Vol II p.2-167..2-169 (*MAT_ELASTIC_PLASTIC_THERMAL / MAT_004):
+    # fixed 7-card keyword.  Card 1 MID RO; Card 2 T1..T8 temperatures;
+    # Card 3 E1..E8 moduli; Card 4 PR1..PR8 Poisson ratios; Card 5
+    # ALPHA1..ALPHA8 thermal expansion coefficients (1/temperature, hence
+    # dimensionless here); Card 6 SIGY1..SIGY8 yield stresses; Card 7
+    # ETAN1..ETAN8 plastic hardening moduli.  Cards 4 and 5 are listed empty
+    # so the trailing-card warning does not fire.
+    "MAT_ELASTIC_PLASTIC_THERMAL": Spec(cards=[
+        C({1: DENSITY}),
+        C({i: TEMP for i in range(8)}),
+        C({i: PRESSURE for i in range(8)}),
+        C(), C(),
+        C({i: PRESSURE for i in range(8)}),
+        C({i: PRESSURE for i in range(8)})]),
+    # R16 Vol II p.2-437..2-441 (*MAT_LOW_DENSITY_FOAM / MAT_057):
+    # Card 1 MID RO E LCID TC HU BETA DAMP - E is the tensile Young's
+    # modulus, TC the tensile stress cut-off, HU a 0..1 hysteretic unloading
+    # factor and BETA the unloading creep decay constant of 1 - exp(-BETA*t),
+    # i.e. a reciprocal time.  DAMP is the 0.05..0.50 viscous coefficient
+    # (and, when negative, a curve id) - dimensionless in both roles.
+    # Card 2 SHAPE FAIL BVFLAG ED BETA1 KCON REF - ED is the Young's
+    # relaxation modulus of g(t) = Ed*exp(-BETA1*t), BETA1 its decay constant
+    # (again 1/time) and KCON a contact stiffness coefficient compared
+    # directly with E in Remark 6.  BETA and BETA1 are the two fields that
+    # silently break a ms<->s conversion if missed.
+    "MAT_LOW_DENSITY_FOAM": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 4: PRESSURE, 6: RATE}),
+        C({3: PRESSURE, 4: RATE, 5: PRESSURE})],
+        curves=[(0, 3, DIMLESS, PRESSURE)],
+        probe={"ro": (0, 1)}),
+    # R16 Vol II p.2-278..2-281 (*MAT_MOONEY-RIVLIN_RUBBER / MAT_027):
+    # Card 1 MID RO PR A B REF - W = A(I-3) + B(II-3) + ... with dimensionless
+    # Cauchy-Green invariants and "2(A+B) is the shear modulus of linear
+    # elasticity", so A and B are stresses.  Card 2 SGL SW ST LCID is the
+    # least-squares specimen: gauge length, width and thickness.  Unlike
+    # MAT_031, A and B are merely IGNORED when the fit is used - never
+    # reinterpreted as inclusion flags - so a plain Spec is safe.
+    "MAT_MOONEY-RIVLIN_RUBBER": Spec(cards=[
+        C({1: DENSITY, 3: PRESSURE, 4: PRESSURE}),
+        C({0: LENGTH, 1: LENGTH, 2: LENGTH})],
+        curves=[(1, 3, LENGTH, FORCE)],
+        probe={"ro": (0, 1)}),
+    # R16 Vol II p.2-645..2-646 (*MAT_ACOUSTIC / MAT_090): Card 1 MID RO C
+    # BETA CF ATMOS GRAV - C is the sound speed, ATMOS the (optional)
+    # atmospheric pressure and GRAV the gravitational acceleration constant;
+    # BETA is a 0.1..1.0 "damping factor" the manual gives no formula for -
+    # the unit-free recommended range is the only evidence that it is a ratio
+    # and not a Rayleigh alpha, so it is left unscaled.  Card 2 XP YP ZP XN
+    # YN ZN - a point on the free surface plus the DIRECTION COSINES of its
+    # normal, which must not be scaled.  The COMPLEX / DAMP / POROUS_DB
+    # variants have completely different layouts and stay unknown.
+    # No density probe: the working fluid is air (RO ~ 1.2), which would drag
+    # unit detection towards g-cm systems.
+    "MAT_ACOUSTIC": Spec(cards=[
+        C({1: DENSITY, 2: VELOCITY, 5: PRESSURE, 6: ACCEL}),
+        C({0: LENGTH, 1: LENGTH, 2: LENGTH})]),
     "EOS_JWL": Spec(cards=[C({1: PRESSURE, 2: PRESSURE, 6: PRESSURE})]),
+    # R16 Vol II p.1-53 (*EOS_MURNAGHAN / EOS_019): EOSID GAMMA K0 V0 with
+    # p = k0[(rho/rho0)^gamma - 1], so only K0 is dimensional; GAMMA is the
+    # polytropic exponent and V0 the initial RELATIVE volume.
+    "EOS_MURNAGHAN": Spec(cards=[C({2: PRESSURE})]),
+    # R16 Vol II p.1-30..1-31 (*EOS_TABULATED / EOS_009): Card 1 EOSID GAMA
+    # E0 V0 LCC LCT, where E0 is the initial internal energy per unit
+    # reference volume ("force per unit area").  Then three PAIRS of data
+    # cards in the fixed order EV, C, T.  Those six cards are drawn with ten
+    # 8-char slots for five variables, i.e. 5 fields of 16 chars - NOT the
+    # default 8x10 - so they carry their own width tuple.  EV holds
+    # volumetric strains ln(V) and T is unitless; only the two C cards
+    # (block indices 3 and 4) are pressures.  All six are omitted when LCC
+    # and LCT are both given, which _apply_spec tolerates.
+    "EOS_TABULATED": Spec(cards=[
+        C({2: PRESSURE}),
+        C({}, EOS_TAB_W), C({}, EOS_TAB_W),
+        C({i: PRESSURE for i in range(5)}, EOS_TAB_W),
+        C({i: PRESSURE for i in range(5)}, EOS_TAB_W),
+        C({}, EOS_TAB_W), C({}, EOS_TAB_W)],
+        curves=[(0, 4, DIMLESS, PRESSURE), (0, 5, DIMLESS, DIMLESS)]),
     "EOS_LINEAR_POLYNOMIAL": Spec(cards=[
         C({i: PRESSURE for i in range(1, 8)}), C({0: PRESSURE})]),
     # R16 Vol II p.1-15..1-16 (*EOS_GRUNEISEN): Card1 EOSID C S1 S2 S3 GAMMAO
@@ -321,10 +430,72 @@ SPECS: Dict[str, Spec] = {
         C({0: LENGTH, 1: LENGTH, 2: LENGTH})]),
     "INITIAL_DETONATION": Spec(repeat=C(
         {1: LENGTH, 2: LENGTH, 3: LENGTH, 4: TIME})),
+    # R16 Vol I p.28-115..28-116 (*INITIAL_TEMPERATURE_NODE / _SET): one
+    # repeating card NID-or-NSID TEMP LOC ("include one card for each node or
+    # node set").  TEMP is classified and reported but never rescaled; LOC is
+    # the -1/0/1 thick-thermal-shell surface flag.  (The manual's Type row
+    # prints "I" for TEMP, but its default is "0." and decks write floats.)
+    "INITIAL_TEMPERATURE_SET": Spec(repeat=C({1: TEMP})),
+    "INITIAL_TEMPERATURE_NODE": Spec(repeat=C({1: TEMP})),
+    # R17 Vol I p.30-77 (*INTERFACE_LINKING_SEGMENT): SSID IFID DEATH,
+    # repeating.  R16 documents only SSID and IFID, but LS-PrePost already
+    # writes the third column and DEATH is a real death time - whitelisting
+    # on the strength of R16 alone would leave it unconverted.
+    "INTERFACE_LINKING_SEGMENT": Spec(repeat=C({2: TIME})),
     # R16 Vol I p.28-91: ISSID CSID LCID PSID VID IZSHEAR ISTIFF
     "INITIAL_STRESS_SECTION": Spec(cards=[C()],
                                    curves=[(0, 2, TIME, PRESSURE)]),
     "CONSTRAINED_SPOTWELD": Spec(repeat=C({2: FORCE, 3: FORCE, 6: TIME})),
+
+    # ── constrained (R16 Vol I) ─────────────────────────────────────────────
+    # p.10-24..10-26 + p.10-31..10-32 (*CONSTRAINED_GENERALIZED_WELD_BUTT):
+    # Card 1 NSID CID FILTER WINDOW NPR NPRT - FILTER is a saved-vector COUNT
+    # and WINDOW the time window for filtering (the R16 Type row prints "I",
+    # but the identical TW of *CONSTRAINED_SPOTWELD_FILTERED_FORCE, p.10-211,
+    # is typed F with the same wording, so it is a TIME).  Card 2c TFAIL EPSF
+    # SIGY BETA L D [Lt] - TFAIL failure time, SIGY the brittle failure STRESS
+    # sigma_f (the name is a red herring), L the weld length and D its
+    # thickness; EPSF and BETA are dimensionless.  Field 6 (Lt, the transverse
+    # butt-weld length) is dropped from the R16/R17 card tables but still
+    # appears in the manual's own example header on p.10-32 - marking it
+    # LENGTH is defensive only, and a no-op on the blank/zero fields decks
+    # actually write.
+    "CONSTRAINED_GENERALIZED_WELD_BUTT": Spec(cards=[
+        C({3: TIME}),
+        C({0: TIME, 2: PRESSURE, 4: LENGTH, 5: LENGTH, 6: LENGTH})]),
+    # p.10-38..10-39 (*CONSTRAINED_GLOBAL): TC RC DIR X Y Z TOL - X/Y/Z are a
+    # point on the constraint plane and TOL is documented verbatim as a
+    # tolerance "in length units".  Modelled with repeat= because real decks
+    # stack several triplets under one keyword (the manual carries no
+    # repetition note, but a repeat= that never repeats costs nothing while
+    # cards=[] would leave lines 2..N silently unscaled).
+    "CONSTRAINED_GLOBAL": Spec(repeat=C(
+        {3: LENGTH, 4: LENGTH, 5: LENGTH, 6: LENGTH})),
+    # p.10-61..10-65 + Figure 10-29 p.10-76 (*CONSTRAINED_JOINT_SCREW):
+    # Card 1 is nodes + the RPS/DAMP scale factors (nothing dimensional, but
+    # it must still occupy a slot in cards= or LENGTH would land on N1/N4);
+    # Card 2 PARM LCID TYPE R1 H_ANGLE - PARM is the helix ratio x_dot/omega,
+    # i.e. (L/T)/(rad/T) = LENGTH per radian, and R1 the gear/pulley radius.
+    # H_ANGLE is a helix angle in degrees.  Never share this Spec with the
+    # other joint types: GEARS/PULLEY read PARM as the dimensionless ratio
+    # R2/R1 and RACK_AND_PINION as a pitch (LENGTH).
+    "CONSTRAINED_JOINT_SCREW": Spec(cards=[C(), C({0: LENGTH, 3: LENGTH})]),
+    # p.10-145..10-151 (*CONSTRAINED_NODAL_RIGID_BODY_SPC): Card 1 PID CID
+    # NSID PNODE IPRT DRFLAG RRFLAG (ids/flags); Card 2 CMO CON1 CON2 SPCNID
+    # XSPC YSPC ZSPC - CMO is a float-typed flag (0.0, +-1.0, +-2.0), CON1/
+    # CON2 are constraint codes or, for CMO < 0, a coordinate-system id and a
+    # 6-digit SPC bit pattern, and only XSPC/YSPC/ZSPC ("coordinates where the
+    # constraints act") are lengths.  Valid for the exact _SPC spelling only -
+    # the options may be combined in any order and each combination shifts the
+    # cards, so e.g. _SPC_INERTIA must keep falling through to unknown.
+    "CONSTRAINED_NODAL_RIGID_BODY_SPC": Spec(cards=[
+        C(), C({4: LENGTH, 5: LENGTH, 6: LENGTH})]),
+    # p.10-161..10-163 (*CONSTRAINED_NODE_SET): NSID DOF TF, TF being the
+    # failure time at which the nodal constraint goes inactive (default 1E20).
+    # cards= rather than repeat=: the _ID option supplies exactly one CNSID
+    # per block, and a stacked deck would raise the loud trailing-card warning
+    # instead of being silently half-scaled.
+    "CONSTRAINED_NODE_SET": Spec(cards=[C({2: TIME})]),
 
     # ── control / database ──────────────────────────────────────────────────
     "CONTROL_TERMINATION": Spec(cards=[C({0: TIME})]),
@@ -341,10 +512,38 @@ SPECS: Dict[str, Spec] = {
     "CONTROL_SPH": Spec(cards=[C({2: TIME, 6: TIME, 7: VELOCITY}), C(), C()]),
     "CONTROL_ALE": Spec(cards=[C(), C({0: TIME, 1: TIME, 6: PRESSURE})],
                         extra_ok=True),
+
+    # ── ALE / S-ALE (R16 Vol I) ─────────────────────────────────────────────
+    # p.4-80..4-87 (*ALE_REFERENCE_SYSTEM_GROUP): Card 1 SID STYPE PRTYPE
+    # PRID BCTRAN BCEXP BCROT ICR/NID is all ids and constraint codes.
+    # Card 2 XC YC ZC EXPLIM EFAC - FRCPAD IEXPND: only XC/YC/ZC, the centre
+    # of mesh expansion and rotation, are coordinates; EXPLIM is a limit
+    # RATIO, EFAC a 0..1 remapping factor and FRCPAD a 0.01..0.2 padding
+    # fraction.  Card 3 (optional) IPIDXCL IPIDTYP is a set id and its type
+    # flag.  Field 5 of Card 2 is blank in the R16/R17 card table - see
+    # x_ale_ref_group for the guard on decks that write there anyway.
+    "ALE_REFERENCE_SYSTEM_GROUP": Spec(cards=[
+        C(), C({0: LENGTH, 1: LENGTH, 2: LENGTH}), C()]),
+    # p.4-102..4-105 (*ALE_STRUCTURED_MESH): Card 1 MSHID DPID NBID EBID - - -
+    # TDEATH, where NBID/EBID are the STARTING node and element ids of the
+    # generated mesh (pure counters, never scaled) and TDEATH the mesh death
+    # time.  Card 2 CPIDX CPIDY CPIDZ NID0 LCSID is all ids - the mesh
+    # geometry itself lives in the CONTROL_POINTS cards.
+    "ALE_STRUCTURED_MESH": Spec(cards=[C({7: TIME}), C()]),
     "CONTROL_IMPLICIT_GENERAL": Spec(cards=[C({1: TIME})]),
     "CONTROL_IMPLICIT_AUTO": Spec(cards=[C({3: TIME, 4: TIME})]),
     "CONTROL_IMPLICIT_DYNAMICS": Spec(cards=[C({3: TIME, 4: TIME, 5: TIME})]),
     "CONTROL_IMPLICIT_EIGENVALUE": Spec(cards=[C({1: FREQ})], extra_ok=True),
+    # R16 Vol I p.15-2..15-4 (*DAMPING_FREQUENCY_RANGE): CDAMP FLOW FHIGH
+    # PSID - PIDREL IFLG ICARD2.  CDAMP is a fraction of critical damping,
+    # which Remark 1 explicitly contrasts with the mass-weighted
+    # (*DAMPING_GLOBAL) and stiffness-proportional forms, so it is a ratio;
+    # FLOW/FHIGH are "lowest/highest frequency in the range of interest
+    # (cycles per unit time)" and must be rescaled with the time unit.  The
+    # optional Card 2 (ICARD2=1 with OPTION1=DEFORM) is CDAMPV IPWP, again
+    # dimensionless - hence extra_ok.
+    "DAMPING_FREQUENCY_RANGE": Spec(cards=[C({1: FREQ, 2: FREQ})],
+                                    extra_ok=True),
     "DAMPING_GLOBAL": Spec(cards=[C({1: FREQ})], curves=[(0, 0, TIME, FREQ)]),
     "DAMPING_PART_MASS": Spec(repeat=C(), curves=[(0, 1, TIME, FREQ)]),
     # R16 Vol I p.16-32: Card1 PSID XCT YCT ZCT XCH YCH ZCH RADIUS;
@@ -356,11 +555,36 @@ SPECS: Dict[str, Spec] = {
         C({0: LENGTH, 1: LENGTH, 2: LENGTH, 3: LENGTH, 4: LENGTH})]),
     "DATABASE_ALE_OPERATION": Spec(cards=[C(), C({0: TIME}), C()]),
 
+    # ── frequency-domain field-point meshes (R16 Vol I p.23-31..23-36) ─────
+    # *FREQUENCY_DOMAIN_ACOUSTIC_FRINGE_PLOT_{OPTION} generates a surface of
+    # field points on which the SPL fringe is plotted.  SPHERE: CENTER R
+    # DENSITY X Y Z HALF1 HALF2 - R is the sphere radius and X/Y/Z its
+    # centre, while DENSITY is a MESH-refinement integer between 3 and 39
+    # ("3 gives 24 elements, 39 gives 8664"), NOT a mass density - scaling it
+    # would be a physics-corrupting mistake.  PLATE: NORM LEN_X LEN_Y X Y Z
+    # NELM_X NELM_Y - two edge lengths and the plate centre.  CUBE: Card 1d.1
+    # LEN_X LEN_Y LEN_Z X Y Z (all six lengths: three edges plus the corner
+    # with the smallest nodal coordinates) and Card 1d.2 three element
+    # counts.  The PART / PART_SET / NODE_SET options carry a single id and
+    # are whitelisted instead.
+    "FREQUENCY_DOMAIN_ACOUSTIC_FRINGE_PLOT_SPHERE": Spec(cards=[
+        C({1: LENGTH, 3: LENGTH, 4: LENGTH, 5: LENGTH})]),
+    "FREQUENCY_DOMAIN_ACOUSTIC_FRINGE_PLOT_PLATE": Spec(cards=[
+        C({1: LENGTH, 2: LENGTH, 3: LENGTH, 4: LENGTH, 5: LENGTH})]),
+    "FREQUENCY_DOMAIN_ACOUSTIC_FRINGE_PLOT_CUBE": Spec(cards=[
+        C({i: LENGTH for i in range(6)}), C()]),
+
     # ── defines ─────────────────────────────────────────────────────────────
-    "DEFINE_BOX": Spec(cards=[C({1: LENGTH, 2: LENGTH, 3: LENGTH, 4: LENGTH,
-                                 5: LENGTH, 6: LENGTH})]),
-    "DEFINE_VECTOR": Spec(repeat=C({1: LENGTH, 2: LENGTH, 3: LENGTH,
-                                    4: LENGTH, 5: LENGTH, 6: LENGTH})),
+    # *DEFINE_BOX and *DEFINE_VECTOR are custom handlers, not Specs: an
+    # S-ALE keyword can change what their fields MEAN (see h_define_box /
+    # h_define_vector).
+    # R16 Vol I p.17-344..17-345 (*DEFINE_PLANE): Card 1 PID X1 Y1 Z1 X2 Y2
+    # Z2 CID and Card 2 X3 Y3 Z3 - three genuine non-collinear POINTS, so all
+    # nine coordinates are lengths (unlike *DEFINE_COORDINATE_VECTOR, whose
+    # triples are directions).
+    "DEFINE_PLANE": Spec(cards=[
+        C({1: LENGTH, 2: LENGTH, 3: LENGTH, 4: LENGTH, 5: LENGTH, 6: LENGTH}),
+        C({0: LENGTH, 1: LENGTH, 2: LENGTH})]),
     "DEFINE_COORDINATE_SYSTEM": Spec(group=[
         C({1: LENGTH, 2: LENGTH, 3: LENGTH, 4: LENGTH, 5: LENGTH, 6: LENGTH}),
         C({0: LENGTH, 1: LENGTH, 2: LENGTH})]),
@@ -392,11 +616,20 @@ SPECS: Dict[str, Spec] = {
     # PID CPID DTOUT PEROUT DIVI ELOUT SSOUT (DTOUT = output time interval).
     "ICFD_DATABASE_DRAG": Spec(repeat=C({2: TIME})),
     "ICFD_DATABASE_DRAG_VOL": Spec(repeat=C({2: TIME})),
+    # R16 Vol III p.7-116 (*ICFD_DATABASE_TEMP): repeating PID DTOUT cards.
+    # DTOUT is an output TIME INTERVAL throughout the *ICFD_DATABASE family
+    # (*ICFD_DATABASE_TPD p.7-118 spells it out: "Time interval to print the
+    # output.  If DTOUT is equal to 0.0, then the ICFD time step is used"),
+    # not a frequency in Hz.  The generic DATABASE_ fallback in resolve()
+    # cannot reach an ICFD_-prefixed name, so it needs its own entry.
+    "ICFD_DATABASE_TEMP": Spec(repeat=C({1: TIME})),
 
     # ── *MESH volume mesher (R16 Vol III) ───────────────────────────────────
-    # R16 Vol III p.8-19 (*MESH_SURFACE_NODE): NID X Y Z, coordinates are
-    # lengths; i8 + 3e16 layout like *NODE (LS-PrePost writes 16-char floats;
-    # p.8-18 documents the companion element card as 6i8, not 6i10).
+    # R16 Vol III p.8-19 (*MESH_SURFACE_NODE) and p.8-9 (*MESH_NODE, which
+    # supersedes it): NID X Y Z [TC RC], coordinates are lengths.  Remark 1 of
+    # p.8-9 states the card format is identical to *NODE, so both share
+    # NODE_W - the trailing TC/RC columns are load-bearing, real mesher output
+    # writes them (p.8-18 documents the companion element card as 6i8).
     "MESH_SURFACE_NODE": Spec(repeat=C(
         {1: LENGTH, 2: LENGTH, 3: LENGTH}, (8, 16, 16, 16))),
 
@@ -408,6 +641,7 @@ SPECS: Dict[str, Spec] = {
     # or flag card, so they are deliberately not routed here.
     "AIRBAG_REFERENCE_GEOMETRY": Spec(repeat=C(
         {1: LENGTH, 2: LENGTH, 3: LENGTH}, (8, 16, 16, 16))),
+    "MESH_NODE": Spec(repeat=C({1: LENGTH, 2: LENGTH, 3: LENGTH}, NODE_W)),
 }
 
 # numeric aliases
@@ -417,6 +651,10 @@ _MAT_ALIASES = {
     "MAT_003": "MAT_PLASTIC_KINEMATIC",
     "MAT_008": "MAT_HIGH_EXPLOSIVE_BURN",
     # "MAT_009" -> MAT_NULL registered via register_keyword() (end of file)
+    "MAT_002_ANIS": "MAT_ANISOTROPIC_ELASTIC",   # bare MAT_002 is the ORTHO
+                                                 # option: different layout
+    "MAT_004": "MAT_ELASTIC_PLASTIC_THERMAL",
+    "MAT_010": "MAT_ELASTIC_PLASTIC_HYDRO",
     "MAT_015": "MAT_JOHNSON_COOK",
     "MAT_018": "MAT_POWER_LAW_PLASTICITY",
     "MAT_020": "MAT_RIGID", "MAT_022": "MAT_COMPOSITE_DAMAGE",
@@ -432,13 +670,19 @@ _MAT_ALIASES = {
     # "MAT_140" -> MAT_VACUUM registered via register_keyword() (end of file)
     # newer *DEFINE_TABLE spellings share the base handler
     "DEFINE_TABLE_2D": "DEFINE_TABLE", "DEFINE_TABLE_3D": "DEFINE_TABLE",
+    "MAT_027": "MAT_MOONEY-RIVLIN_RUBBER",
+    "MAT_031": "MAT_FRAZER_NASH_RUBBER_MODEL",
+    "MAT_090": "MAT_ACOUSTIC",
+    "MAT_102": "MAT_INV_HYPERBOLIC_SIN",
     "MAT_159": "MAT_CSCM", "MAT_159_CONCRETE": "MAT_CSCM_CONCRETE",
     "MAT_S01": "MAT_SPRING_ELASTIC", "MAT_S02": "MAT_DAMPER_VISCOUS",
     "MAT_S03": "MAT_SPRING_ELASTOPLASTIC",
     "MAT_S04": "MAT_SPRING_NONLINEAR_ELASTIC",
     "MAT_S05": "MAT_DAMPER_NONLINEAR_VISCOUS",
+    "MAT_T01": "MAT_THERMAL_ISOTROPIC",
     "EOS_001": "EOS_LINEAR_POLYNOMIAL", "EOS_002": "EOS_JWL",
     "EOS_004": "EOS_GRUNEISEN",
+    "EOS_009": "EOS_TABULATED", "EOS_019": "EOS_MURNAGHAN",
 }
 
 # keywords that carry no dimensional data at all
@@ -480,11 +724,92 @@ WHITELIST = {
     # DATABASE keywords that carry ids/flags only (no DT field)
     "DATABASE_NODAL_FORCE_GROUP", "DATABASE_SPRING_FORWARD",
     "DATABASE_MASSOUT",
+    # R16 Vol III p.7-117 (*ICFD_DATABASE_TIMESTEP): one OUTLV on/off flag -
+    # despite the name the card carries no timestep value.
+    "ICFD_DATABASE_TIMESTEP",
+    # R16 Vol III p.8-6 (*MESH_BL_SYM): eight surface part ids, no sizing data
+    # (unlike *MESH_BL, which is handled by h_mesh_bl).
+    "MESH_BL_SYM",
+
+    # ── structural topology: thick shells, beams, IGA (R16 Vol I) ───────────
+    # p.19-5/19-12: Card 1 is EID PID N1 N2 N3 + release codes, Card 8 is the
+    # VX/VY/VZ orientation vector.  Per Remark 1 (p.19-14) only the DIRECTION
+    # of that vector enters (it locates a virtual third node fixing the r-s
+    # plane), so it is invariant under a uniform length rescale.
+    "ELEMENT_BEAM_ORIENTATION",
+    # p.19-140: EID PID N1..N8, pure connectivity.  The BETA option adds
+    # Card 2a whose only field is the orthotropic base offset angle in
+    # DEGREES (5th field of a 5 x 16-char card) - also dimensionless.  The
+    # COMPOSITE option instead carries ply THICKnesses and stays unknown.
+    "ELEMENT_TSHELL", "ELEMENT_TSHELL_BETA",
+    # p.19-126..19-131 (*ELEMENT_SOLID_NURBS_PATCH): Card 1 NPID PID NPR PR
+    # NPS PS NPT PT and Card 2 WFL NISR NISS NIST IMASS IINT - IDFNE are
+    # counts, polynomial orders and flags; Cards 3-5 are the r/s/t knot
+    # vectors (parametric knot values on the reference domain, dimensionless);
+    # Card 6 lists control-point *NODE ids (the geometry lives in *NODE and is
+    # scaled there); Card 7 (WFL != 0) holds NURBS weights, dimensionless.
+    # So the whole patch definition carries no (M,L,T) quantity.
+    "ELEMENT_SOLID_NURBS_PATCH",
+    # p.29-16..29-17 (*INTEGRATION_SHELL): S is a natural through-thickness
+    # coordinate in [-1, 1] and WF the weight dt_i/t, both ratios.  (Do NOT
+    # generalise to *INTEGRATION_BEAM: its D1-D6 / SREF / TREF are lengths.)
+    "INTEGRATION_SHELL",
+    # p.41-112..41-114 (*SECTION_TSHELL): SECID ELFORM SHRF NIP PROPT QR
+    # ICOMP TSHEAR plus, for ICOMP=1, the B1..B8 material angles in degrees.
+    # Unlike *SECTION_SHELL there is no thickness field at all - a thick
+    # shell's thickness comes from the element connectivity.
+    "SECTION_TSHELL",
+
+    # ── constrained (R16 Vol I) ────────────────────────────────────────────
+    # p.10-61..10-64: these joint types read Card 1 only (Card 2 is required
+    # for MOTOR/GEARS/RACK_AND_PINION/PULLEY/SCREW).  Card 1 is N1..N6 plus
+    # RPS, a RELATIVE penalty-stiffness factor on a stiffness LS-DYNA computes
+    # itself (Remark 3, p.10-68), and DAMP, a "damping scale factor on default
+    # damping value" - both pure factors.  Exact names only: the _FAILURE and
+    # _LOCAL spellings add TIME/FORCE/MOMENT cards and must stay unknown.
+    "CONSTRAINED_JOINT_REVOLUTE", "CONSTRAINED_JOINT_SPHERICAL",
+    "CONSTRAINED_JOINT_TRANSLATIONAL",
+    # p.10-181: NID + NSID, a shell node tied to a set of solid nodes.
+    "CONSTRAINED_SHELL_TO_SOLID",
+    # p.10-224: NSID EPPF ETYPE [PID].  EPPF is a plastic strain, volumetric
+    # strain or GISSMO damage at failure - dimensionless in every branch.
+
+    # ── S-ALE (R16 Vol I) ──────────────────────────────────────────────────
+    # p.4-117..4-119 (*ALE_STRUCTURED_MESH_REFINE[_REGION]): MSHID plus the
+    # integer refinement factors IFX/IFY/IFZ; the REGION card holds nodal
+    # INDICES (IMIN..KMAX) into the control-point list, not coordinates.
+    "ALE_STRUCTURED_MESH_REFINE", "ALE_STRUCTURED_MESH_REFINE_REGION",
+
+    # ── misc (R16 Vol I) ───────────────────────────────────────────────────
+    # p.17-75: CID XX YX ZX XV YV ZV NID - the origin is fixed at (0,0,0) and
+    # the axes follow from z = x cross v_xy, so both triples are DIRECTIONS
+    # and carry no unit.  (*DEFINE_COORDINATE_SYSTEM gives three real points
+    # and is a Spec with LENGTH fields - do not confuse the two.)
+    "DEFINE_COORDINATE_VECTOR",
+    # p.30-63..30-65: SID CID NID only; the recorded motion goes into the
+    # binary interface file, not into the deck.
+    "INTERFACE_COMPONENT_SEGMENT",
+    # p.23-32 (*FREQUENCY_DOMAIN_ACOUSTIC_FRINGE_PLOT_{OPTION}): the PART,
+    # PART_SET and NODE_SET options take a single id card; the geometric
+    # SPHERE / PLATE / CUBE options carry lengths and are Specs.
+    "FREQUENCY_DOMAIN_ACOUSTIC_FRINGE_PLOT_PART",
+    "FREQUENCY_DOMAIN_ACOUSTIC_FRINGE_PLOT_PART_SET",
+    "FREQUENCY_DOMAIN_ACOUSTIC_FRINGE_PLOT_NODE_SET",
 }
 WHITELIST_PREFIXES = (
     "SET_", "BOUNDARY_SPC", "DATABASE_HISTORY", "CONTROL_MPP_",
     "DEFORMABLE_TO_RIGID", "INTERFACE_SPRINGBACK",
     "DATABASE_EXTENT_",     # output-content flags only
+    # R16 Vol I p.7-1..7-4: *CASE, *CASE_BEGIN_n and *CASE_END_n are pure
+    # subcase markers.  *CASE's own cards hold a case id, a job-id string,
+    # free-text command-line arguments and a list of subcase ids; BEGIN/END
+    # have no data-card table at all.  The numbered suffix rules out exact
+    # keys, and no other LS-DYNA keyword starts with "CASE".
+    "CASE",
+    # R16 Vol III p.7-10..7-13: *ICFD_BOUNDARY_FSI and its _EXCLUDE, _FIXED
+    # and _ONEWAY sub-options carry a fluid part id (plus, for _ONEWAY, the
+    # 1/2 coupling-direction flag IOWC) - nothing dimensional in any of them.
+    "ICFD_BOUNDARY_FSI",
 )
 # ASCII output files whose card 1 is 'DT BINARY LCUR IOOPT' (R16 Vol I
 # *DATABASE_OPTION table) - the only DATABASE_ keywords where field 0 is a
@@ -686,30 +1011,64 @@ def h_prescribed_motion(block: Block, ctx, edit: bool) -> None:
 
 
 def h_contact(block: Block, ctx, edit: bool) -> None:
-    if not edit:
-        return
+    """*CONTACT_... mandatory Cards 1-3 plus Optional Cards A and B.
+
+    The MORTAR spelling (OPTION1) adds no card - the card ORDER is that of
+    the matching non-Mortar contact (R16 Vol I p.11-6..11-7) - but it changes
+    two field meanings by value: Card 3 SFSA < 0 makes |SFSA| a load curve of
+    contact pressure versus penetration depth (p.11-33), and Optional Card B
+    PENMAX is the maximum penetration DISTANCE for Mortar contact rather than
+    a fraction of the segment thickness (p.11-102).
+
+    The MPP option (OPTION5) PREPENDS MPP Card 1 and, when the following line
+    begins with an ampersand, MPP Card 2 (p.11-6, p.11-19).  Neither carries
+    a dimensional field - BCKT is a bucket-sort frequency in CYCLES, PARMAX a
+    parametric extension around 1.0, PENSF a per-cycle multiplier and IGTOL a
+    scale factor on the segment+node thickness - but the shift they cause
+    must be modelled or Card 2's friction/time map would land on MPP Card 1.
+    """
     kf = ctx.kf
     data = _strip_title(block, list(block.data))
+    opts = block.name.split("_")
     tiebreak = "TIEBREAK" in block.name
-    plan = [
+    mortar = "MORTAR" in opts
+    plan: List[Dict[int, Dim]] = []
+    if "MPP" in opts:
+        plan.append({})                                  # MPP Card 1
+        if len(data) > 1 and kf.lines[data[1]].lstrip().startswith("&"):
+            plan.append({})                              # MPP Card 2
+    mpp_off = len(plan)
+    plan += [
         {},                                              # card1: ids
         {2: DC_FRIC, 3: PRESSURE, 6: TIME, 7: TIME},     # card2
         {2: LENGTH, 3: LENGTH},                          # card3: SST MST
     ]
+    if mortar and len(data) > mpp_off + 2:
+        sfsa = kf.get_number(data[mpp_off + 2], STD8, block.long, 0)
+        if sfsa is not None and sfsa < 0 and not edit:
+            ctx.register_curve(int(-sfsa), LENGTH, PRESSURE,
+                               block.name + " Mortar p(penetration)")
+    if not edit:
+        return
     if tiebreak:
         # R16 Vol I p.11-35 Card 4: OPTION NFLS SFLS PARAM ERATEN ERATES
         # CT2CN CN.  ERATEN/ERATES = energy/area, CN = stiffness/length.
         # It comes BEFORE the optional cards A and B.
         plan.append({1: PRESSURE, 2: PRESSURE, 4: STIFF, 5: STIFF,
                      7: STIFF_LEN})
-    plan.append({})                                      # A (flags)
-    plan.append({6: LENGTH, 7: PRESSURE})                # B: SLDTHK SLDSTF
+    else:
+        plan.append({})                                  # A (flags)
+    # B: PENMAX SLDTHK SLDSTF.  PENMAX is a fraction of the segment
+    # thickness for the a3/a5/a10/13/15/26 types but a maximum penetration
+    # DISTANCE for Mortar (and the old 3/5/8/9/10 types), R16 Vol I p.11-102.
+    plan.append({6: LENGTH, 7: PRESSURE}
+                if not mortar else {0: LENGTH, 6: LENGTH, 7: PRESSURE})
     for ci, li in enumerate(data):
         if ci >= len(plan):
             ctx.warn(f"*{block.name}: optional card {ci + 1} left unscaled "
                      "(advanced options not modelled) - verify manually.")
             break
-        if tiebreak and ci == 3:
+        if tiebreak and ci == mpp_off + 3:
             option = abs(_numint(kf, li, STD8, block.long, 0) or 0)
             if option in (13, 14):
                 ctx.error(f"*{block.name}: TIEBREAK OPTION={option} adds "
@@ -817,24 +1176,519 @@ def x_mat_018(block: Block, ctx) -> None:
     kf.scale_field(data[1], STD8, block.long, 0, f)
 
 
-def x_mat_100(block: Block, ctx: "Ctx") -> None:
-    """Edit-time warning for *MAT_SPOTWELD (MAT_100) Card 2 (R16 Vol II
-    p.2-338..2-341): EFAIL NRR NRS NRT MRR MSS MTT NF.  EFAIL is a failure
-    plastic strain (dimensionless) and NF a count, but NRR/NRS/NRT and
-    MRR/MSS/MTT are force/moment resultants for the resultant-based failure
-    surface and STRESSES when the stress-based option is active - a dimension
-    that the fixed table cannot resolve without the option flag.  They are
-    left unscaled and flagged rather than silently scaled as one or the other."""
+def h_airbag_simple(block: Block, ctx, edit: bool) -> None:
+    """*AIRBAG_SIMPLE_AIRBAG_MODEL and *AIRBAG_SIMPLE_PRESSURE_VOLUME,
+    R16 Vol I p.3-1..3-16.
+
+    Shared core Card 1 SID SIDTYP RBID VSCA PSCA VINI MWD SPSF: VINI is the
+    initial filled VOLUME and MWD the mass-weighted damping factor D of
+    F_i = m_i*D*(v_i - v_cg), i.e. a reciprocal time.  SPSF is a 0..1
+    stagnation-pressure factor.
+
+    RBID selects how many sensor cards follow, so the card count is
+    flag-dependent: RBID = 0 none; RBID > 0 Card 2a (N) plus ceil(N/5) cards
+    of user constants; RBID < 0 three cards of activation thresholds
+    (accelerations + a duration, velocities, displacements).
+
+    VSCA and PSCA are only dimensionless when the control-volume
+    thermodynamics run in the SAME unit system as the FE model
+    (V_cvolume = VSCA*V_femodel, P_femodel = PSCA*P_cvolume, p.3-4).  Any
+    other value means the gas data are in a foreign system that nothing in
+    the deck names, so it is refused.
+
+    SIMPLE_AIRBAG_MODEL then reads Card 3 CV CP T LCID MU AREA PE RO (heat
+    capacities, inlet temperature, the mass-flow-rate curve, the exit-hole
+    shape factor, the exit AREA, ambient pressure and density; MU < 0 and
+    AREA < 0 make those fields curve ids) and Card 4a LOU T_EXT A B MW GASC.
+    Card 4a is only read when CV = 0 - otherwise the card degenerates to
+    Card 4b, which holds LOU alone and ignores fields 1-5, so they are left
+    untouched.  A, B and GASC are per-mole-per-kelvin quantities that reduce
+    to an ENERGY once mole and temperature are factored out, which the
+    c_p = (a + bT)/MW identity of Remark 3 confirms: energy/mass = specific
+    heat.
+
+    SIMPLE_PRESSURE_VOLUME instead reads Card 3 CN BETA LCID LCIDDR with
+    Pressure = BETA*CN/RelativeVolume; the relative volume is dimensionless,
+    so CN carries the whole pressure dimension (and is a curve id when
+    negative) while BETA is a pure multiplier.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    pv = "PRESSURE" in block.name.split("_")
+    c1 = data[0]
+    for fi, nm in ((3, "VSCA"), (4, "PSCA")):
+        v = kf.get_number(c1, STD8, block.long, fi)
+        if v is not None and v != 0 and v != 1:
+            ctx.error(f"*{block.name}: {nm}={v} means the control-volume gas "
+                      "thermodynamics run in a DIFFERENT unit system than "
+                      "the FE model (R16 Vol I p.3-4); the deck does not say "
+                      "which, so CV/CP/PE/RO/VINI cannot be scaled safely - "
+                      "convert this airbag manually.")
+            return
+    rbid = _numint(kf, c1, STD8, block.long, 2) or 0
+    idx = 1
+    sensor: List[Tuple[int, Dict[int, Dim]]] = []
+    if rbid > 0:
+        if idx >= len(data):
+            ctx.error(f"*{block.name}: RBID={rbid} > 0 requires the sensor "
+                      "Card 2a (R16 Vol I p.3-5) - not found.")
+            return
+        n = _numint(kf, data[idx], STD8, block.long, 0) or 0
+        nconst = -(-max(n, 0) // 5)              # ceil(n / 5)
+        if nconst:
+            ctx.warn(f"*{block.name}: RBID={rbid} selects a user-defined "
+                     f"sensor with {n} constant(s) whose units the manual "
+                     "does not document - those cards are left UNSCALED, "
+                     "verify them manually.")
+        idx += 1 + nconst
+    elif rbid < 0:
+        sensor = [(idx, {0: ACCEL, 1: ACCEL, 2: ACCEL, 3: ACCEL, 4: TIME}),
+                  (idx + 1, {i: VELOCITY for i in range(4)}),
+                  (idx + 2, {i: LENGTH for i in range(4)})]
+        idx += 3
+    if idx >= len(data):
+        ctx.error(f"*{block.name}: RBID={rbid} implies the gas card at data "
+                  f"line {idx + 1}, but the block has only {len(data)}.")
+        return
+    c3 = data[idx]
+
+    if not edit:
+        if pv:
+            cn = kf.get_number(c3, STD8, block.long, 0)
+            if cn is not None and cn < 0:
+                ctx.register_curve(int(-cn), TIME, PRESSURE,
+                                   block.name + " CN(time)")
+            lcid = _numint(kf, c3, STD8, block.long, 2)
+            if lcid:                       # pressure vs RELATIVE volume
+                ctx.register_curve(lcid, DIMLESS, PRESSURE,
+                                   block.name + " p(relative volume)")
+            lciddr = _numint(kf, c3, STD8, block.long, 3)
+            if lciddr:
+                ctx.register_curve(lciddr, TIME, PRESSURE,
+                                   block.name + " CN(time), relaxation")
+            return
+        lcid = _numint(kf, c3, STD8, block.long, 3)
+        if lcid:                    # mass flow rate in, (1,0,-1) = DAMP
+            ctx.register_curve(lcid, TIME, DAMP,
+                               block.name + " mass flow rate in(time)")
+        mu = kf.get_number(c3, STD8, block.long, 4)
+        if mu is not None and mu < 0:
+            ctx.register_curve(int(-mu), PRESSURE, DIMLESS,
+                               block.name + " shape factor(pressure)")
+        area = kf.get_number(c3, STD8, block.long, 5)
+        if area is not None and area < 0:
+            ctx.register_curve(int(-area), PRESSURE, AREA,
+                               block.name + " exit area(pressure)")
+        if idx + 1 < len(data):
+            lou = _numint(kf, data[idx + 1], STD8, block.long, 0)
+            if lou:
+                ctx.register_curve(lou, PRESSURE, DAMP,
+                                   block.name + " mass flow rate out(p)")
+        return
+
+    kf.scale_field(c1, STD8, block.long, 5, ctx.fac(VOLUME))   # VINI
+    kf.scale_field(c1, STD8, block.long, 6, ctx.fac(RATE))     # MWD
+    for li_idx, dims in sensor:
+        for fi, dim in dims.items():
+            kf.scale_field(data[li_idx], STD8, block.long, fi, ctx.fac(dim))
+    if pv:
+        cn = kf.get_number(c3, STD8, block.long, 0)
+        if cn is None or cn >= 0:
+            kf.scale_field(c3, STD8, block.long, 0, ctx.fac(PRESSURE))
+        else:
+            ctx.note(f"*{block.name}: CN={cn} is a curve id (R16 Vol I "
+                     "p.3-10) - left unchanged.")
+        ctx.count(block.name)
+        return
+    cv = kf.get_number(c3, STD8, block.long, 0)
+    for fi in (0, 1):                                          # CV CP
+        kf.scale_field(c3, STD8, block.long, fi, ctx.fac(SPEC_HEAT))
+    area = kf.get_number(c3, STD8, block.long, 5)
+    if area is None or area >= 0:
+        kf.scale_field(c3, STD8, block.long, 5, ctx.fac(AREA))
+    kf.scale_field(c3, STD8, block.long, 6, ctx.fac(PRESSURE))  # PE
+    kf.scale_field(c3, STD8, block.long, 7, ctx.fac(DENSITY))   # RO
+    if idx + 1 < len(data):
+        if cv:
+            ctx.note(f"*{block.name}: CV={cv} != 0, so the fourth card is "
+                     "read as Card 4b (LOU only) and its A/B/MW/GASC columns "
+                     "are ignored by LS-DYNA (R16 Vol I p.3-12) - left "
+                     "unchanged.")
+        else:
+            for fi in (2, 3, 5):                               # A B GASC
+                kf.scale_field(data[idx + 1], STD8, block.long, fi,
+                               ctx.fac(MOMENT))
+            kf.scale_field(data[idx + 1], STD8, block.long, 4,
+                           ctx.fac(MASS))                      # MW
+    ctx.count(block.name)
+
+
+def h_load_thermal_load_curve(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.33-160 (*LOAD_THERMAL_LOAD_CURVE): repeating LCID LCIDDR
+    cards.  Nothing on the card itself is dimensional, but both curves give a
+    uniform nodal temperature as a function of TIME, so their abscissae need
+    the time factor - which is why this is not a whitelist entry.  A handler
+    rather than spec.curves because spec.curves only ever sees the first data
+    line of a repeating card."""
+    kf = ctx.kf
+    if not edit:
+        for li in block.data:
+            for fi in (0, 1):                                 # LCID LCIDDR
+                lcid = _numint(kf, li, STD8, block.long, fi)
+                if lcid:
+                    ctx.register_curve(lcid, TIME, TEMP,
+                                       block.name + " temperature(time)")
+        return
+    ctx.count(block.name + " (curve-carried)")
+
+
+def h_load_thermal_variable(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.33-168..33-169 (*LOAD_THERMAL_VARIABLE): repeating SETS of
+    two cards.  Card 1 NSID NSIDEX BOXID holds ids; Card 2 TS TB LCID TSE TBE
+    LCIDE LCIDR LCIDEDR gives T = TB + TS*f(t) (Remark 1), so TS/TB and the
+    exempted-node pair TSE/TBE are temperatures and the four LCIDs are shape
+    curves against TIME.  Whether the curve ordinate is the temperature
+    itself (TS = 1.0) or a normalised 0..1 shape is a modelling convention;
+    both are numerically identical here because temperatures are never
+    rescaled."""
+    kf = ctx.kf
+    data = list(block.data)
+    if len(data) % 2:
+        ctx.error(f"*{block.name}: {len(data)} data cards is not a multiple "
+                  "of the 2-card set (R16 Vol I p.33-168) - the layout was "
+                  "not understood, refusing to guess.")
+        return
+    for i in range(1, len(data), 2):
+        li = data[i]
+        if not edit:
+            for fi in (2, 5, 6, 7):            # LCID LCIDE LCIDR LCIDEDR
+                lcid = _numint(kf, li, STD8, block.long, fi)
+                if lcid:
+                    ctx.register_curve(lcid, TIME, TEMP,
+                                       block.name + " temperature(time)")
+        elif any(kf.get_number(li, STD8, block.long, fi)
+                 for fi in (0, 1, 3, 4)):      # TS TB TSE TBE
+            ctx.note(f"*{block.name}: temperature field left unchanged "
+                     "(temperatures are never rescaled)")
+    if edit:
+        ctx.count(block.name)
+
+
+# *RIGIDWALL_GEOMETRIC shape card (Card 3a-3d), R16 Vol I p.40-9..40-12.
+# FLAT/PRISM give the head of the edge vector l plus the edge lengths;
+# SPHERE gives a radius.  CYLINDER is deliberately absent - its NSEGS-driven
+# extra cards and the DEFORM sub-cards are not modelled.
+_RW_SHAPE_CARD: Dict[str, Dict[int, Dim]] = {
+    "FLAT": {0: LENGTH, 1: LENGTH, 2: LENGTH, 3: LENGTH, 4: LENGTH},
+    "PRISM": {i: LENGTH for i in range(6)},
+    "SPHERE": {0: LENGTH},
+}
+
+
+def h_rigidwall_geometric(block: Block, ctx, edit: bool) -> None:
+    """*RIGIDWALL_GEOMETRIC_{SHAPE}_{OPTION}..., R16 Vol I p.40-4..40-15.
+
+    One SET of cards per rigid wall, repeated to the end of the block:
+    [ID/title card] Card 1 NSID NSIDEX BOXID BIRTH DEATH; Card 2 XT YT ZT XH
+    YH ZH FRIC - the tail and head of the normal are absolute POINTS, so all
+    six are lengths while FRIC is a Coulomb coefficient; the shape card
+    (3a FLAT, 3b PRISM, 3d SPHERE); then, in this order, Card 4 for the
+    MOTION option (LCID OPT VX VY VZ - the direction cosines and the flag are
+    dimensionless, the curve is prescribed motion versus time and OPT picks
+    its ordinate) and Card 5 for the DISPLAY option (PID RO E PR - the
+    display body's density and modulus; the manual types them "I", which is a
+    typo given the 1e-9 / 1e-4 defaults).
+
+    The options may be written in any order, so the plan is assembled from
+    the option tokens rather than keyed on one spelling.  The CYLINDER shape
+    is refused: its Card 3c is followed by NSEGS segment cards and, with
+    DEFORM, two more cards including four curve ids the manual gives no
+    dimensions for.
+    """
+    kf = ctx.kf
+    opts = block.name.split("_")
+    shape = next((s for s in ("FLAT", "PRISM", "CYLINDER", "SPHERE")
+                  if s in opts), None)
+    if shape is None or shape == "CYLINDER":
+        ctx.error(f"*{block.name}: geometric rigid-wall shape "
+                  f"{shape or '<none>'} is not modelled (CYLINDER adds "
+                  "NSEGS segment cards and, with DEFORM, curve ids with "
+                  "undocumented dimensions, R16 Vol I p.40-10..40-12) - "
+                  "convert this rigid wall manually.")
+        return
+    seq: List[Dict[int, Dim]] = []
+    if "ID" in opts or "TITLE" in opts:
+        seq.append({})                                   # id + A70 heading
+    seq.append({3: TIME, 4: TIME})                       # Card 1 BIRTH DEATH
+    seq.append({i: LENGTH for i in range(6)})            # Card 2 tail/head
+    seq.append(_RW_SHAPE_CARD[shape])                    # Card 3a/3b/3d
+    motion = "MOTION" in opts
+    if motion:
+        seq.append({})                                   # Card 4
+    if "DISPLAY" in opts:
+        seq.append({1: DENSITY, 2: PRESSURE})            # Card 5
+    data = list(block.data)
+    if len(data) % len(seq):
+        ctx.error(f"*{block.name}: {len(data)} data cards is not a multiple "
+                  f"of the expected set size {len(seq)} for this option "
+                  "combination - refusing to guess which card is which.")
+        return
+    for base in range(0, len(data), len(seq)):
+        if motion:
+            li = data[base + len(seq) - (2 if "DISPLAY" in opts else 1)]
+            lcid = _numint(kf, li, STD8, block.long, 0)
+            opt = _numint(kf, li, STD8, block.long, 1) or 0
+            if lcid and not edit:
+                ydim = {0: VELOCITY, 1: LENGTH}.get(opt)
+                if ydim is None:
+                    ctx.error(f"*{block.name}: MOTION OPT={opt} is not "
+                              "documented (0 = velocity, 1 = displacement, "
+                              "R16 Vol I p.40-13).")
+                    return
+                ctx.register_curve(lcid, TIME, ydim, block.name + " motion")
+        if not edit:
+            continue
+        for ci, dims in enumerate(seq):
+            for fi, dim in dims.items():
+                kf.scale_field(data[base + ci], STD8, block.long, fi,
+                               ctx.fac(dim))
+    if edit:
+        ctx.count(block.name)
+
+
+def h_mat_frazer_nash(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol II p.2-296..2-299 (*MAT_FRAZER_NASH_RUBBER_MODEL / MAT_031).
+
+    Card 1 MID RO PR C100 C200 C300 C400; Card 2 C110 C210 C010 C020 EXIT
+    EMAX EMIN REF; Card 3 SGL SW ST LCID.
+
+    The eight strain-energy coefficients are strain-energy DENSITIES (the
+    invariants of the right Cauchy-Green tensor are dimensionless, so every
+    Cijk carries stress units) - but only when they are given directly.  When
+    a least-squares fit is requested each of them degenerates to a 0/1
+    INCLUSION FLAG: "If a least squares fit is being used, set this constant
+    to 1.0 if the term it belongs to in the strain energy functional is to be
+    included" (p.2-296..2-297).  Scaling a 1.0 flag by the pressure factor
+    would switch terms of U off, so the branch is decided first.
+
+    The manual's trigger for the fit is the whole of Card 3 (SGL, SW, ST and
+    LCID); LCID != 0 is used as the proxy here because no fit is possible
+    without the force/elongation curve.  RO, SGL, SW and ST are scaled in
+    both branches; EMAX/EMIN are Green-St-Venant strain limits.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 3:
+        ctx.error(f"*{block.name}: expected 3 cards (MID/RO/PR/C100..C400, "
+                  f"C110..C020/EXIT/EMAX/EMIN, SGL/SW/ST/LCID), found "
+                  f"{len(data)}.")
+        return
+    lcid = _numint(kf, data[2], STD8, block.long, 3) or 0
+    if not edit:
+        if lcid:
+            ctx.register_curve(lcid, LENGTH, FORCE,
+                               block.name + " force(gauge-length change)")
+        return
+    kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(DENSITY))    # RO
+    for fi in (0, 1, 2):                                    # SGL SW ST
+        kf.scale_field(data[2], STD8, block.long, fi, ctx.fac(LENGTH))
+    if lcid:
+        ctx.note(f"*{block.name}: LCID={lcid} requests a least-squares fit, "
+                 "so C100..C020 are 0/1 term-inclusion flags (R16 Vol II "
+                 "p.2-296) - left unchanged.")
+    else:
+        for fi in (3, 4, 5, 6):                             # C100 C200 C300 C400
+            kf.scale_field(data[0], STD8, block.long, fi, ctx.fac(PRESSURE))
+        for fi in (0, 1, 2, 3):                             # C110 C210 C010 C020
+            kf.scale_field(data[1], STD8, block.long, fi, ctx.fac(PRESSURE))
+    if len(data) > 3:
+        ctx.warn(f"*{block.name}: {len(data) - 3} trailing card(s) beyond the "
+                 "3-card layout left unscaled - verify manually.")
+    ctx.count(block.name)
+
+
+def h_mat_inv_hyperbolic_sin(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol II p.2-710..2-713 (*MAT_INV_HYPERBOLIC_SIN / MAT_102).
+
+    Card 1a MID RO E PR T HC VP; Card 2a ALPHA N A Q G EPS0 LCQ.
+
+    The flow stress is sigma = (1/ALPHA)*asinh[(Z/A)^(1/N)] with the
+    Zener-Hollomon parameter Z = max(eps_dot, EPS0)*exp(Q/(G*T)).  asinh(...)
+    is a pure number, so 1/ALPHA is a stress and ALPHA an INVERSE pressure;
+    the heat-generation coefficient HC ~ 0.9/(rho*Cv) (Remark 1, p.2-713)
+    reduces to the same signature once temperature is factored out.  A is
+    documented as 1/sec and EPS0 as a minimum strain rate.
+
+    Q (molar activation energy, J/mol) and G (the gas constant, 8.3144
+    J/(mol K) or 40.8825 lb in/(mol degR)) only ever enter as the ratio
+    Q/(G*T).  'mol' is not a base dimension kunit models and G additionally
+    bundles the temperature unit, so both are left UNCHANGED: leaving both
+    alone and scaling both by the same energy factor are equally correct, and
+    only a mixed treatment would change the exponent.  The LCQ curve carries
+    the same units as Q and is therefore left alone too.
+    """
     kf = ctx.kf
     data = _strip_title(block, list(block.data))
     if len(data) < 2:
+        ctx.error(f"*{block.name}: expected 2 cards (MID/RO/E/PR/T/HC/VP and "
+                  f"ALPHA/N/A/Q/G/EPS0/LCQ), found {len(data)}.")
         return
-    if any(kf.get_number(data[1], STD8, block.long, fi) for fi in range(1, 7)):
-        ctx.warn(f"*{block.name}: Card 2 failure resultants NRR/NRS/NRT (axial/"
-                 "shear) and MRR/MSS/MTT (moments) are force/moment for the "
-                 "resultant-based failure but stresses for the stress-based "
-                 "option (R16 Vol II p.2-338) - left UNSCALED; scale them "
-                 "manually as force/moment (or stress) to match your option.")
+    lcq = _numint(kf, data[1], STD8, block.long, 6) or 0
+    if not edit:
+        if lcq:
+            # LCQ > 0: Q vs plastic strain; LCQ < 0: Q vs temperature.  Both
+            # axes stay unscaled under the Q-unchanged convention.
+            ctx.register_curve(abs(lcq), DIMLESS, DIMLESS,
+                               block.name + " Q curve (left unscaled)")
+        return
+    kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(DENSITY))        # RO
+    kf.scale_field(data[0], STD8, block.long, 2, ctx.fac(PRESSURE))       # E
+    kf.scale_field(data[0], STD8, block.long, 5, ctx.fac(INV_PRESSURE))   # HC
+    kf.scale_field(data[1], STD8, block.long, 0, ctx.fac(INV_PRESSURE))   # ALPHA
+    kf.scale_field(data[1], STD8, block.long, 2, ctx.fac(RATE))           # A
+    kf.scale_field(data[1], STD8, block.long, 5, ctx.fac(RATE))           # EPS0
+    ctx.note(f"*{block.name}: Q (molar activation energy) and G (gas "
+             "constant) left UNCHANGED - only the ratio Q/(G*T) enters the "
+             "Zener-Hollomon parameter, and both are defined per mole and "
+             "per kelvin/rankine, dimensions kunit does not model "
+             "(R16 Vol II p.2-713).")
+    if len(data) > 2:
+        ctx.warn(f"*{block.name}: {len(data) - 2} trailing card(s) beyond the "
+                 "2-card layout left unscaled - verify manually.")
+    ctx.count(block.name)
+
+
+def h_mat_spotweld(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol II p.2-678..2-697 (*MAT_SPOTWELD / MAT_100), base option.
+
+    Card 1 MID RO E PR SIGY EH DT TFAIL; Card 2a EFAIL NRR NRS NRT MRR MSS
+    MTT NF.  DT is the mass-scaling time step and TFAIL the failure time;
+    EFAIL is a plastic strain and NF a filter count.
+
+    Four groups of fields are sign-overloaded (p.2-681..2-682): SIGY "GT.0:
+    Initial yield stress ... LT.0: A yield curve or table is assigned by
+    |SIGY|", and each of NRR/NRS/NRT (force resultants at failure) and
+    MRR/MSS/MTT (torsional and bending moment resultants) "GT.0: Constant
+    value / LT.0: |X| is a load curve ID ... as a function of the effective
+    strain rate".  A negative value is a bare id and must survive untouched.
+    E < 0 only selects the legacy uniaxial solid-weld formulation while |E|
+    remains the modulus, so E is scaled unconditionally.
+
+    A negative SIGY may name a *DEFINE_TABLE instead of a curve; the manual
+    does not document that table's value axis, so kunit refuses rather than
+    guess it.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 2:
+        ctx.error(f"*{block.name}: expected 2 cards (MID/RO/E/PR/SIGY/EH/DT/"
+                  f"TFAIL and EFAIL/NRR..MTT/NF), found {len(data)}.")
+        return
+    resultants = ((1, FORCE, "NRR"), (2, FORCE, "NRS"), (3, FORCE, "NRT"),
+                  (4, MOMENT, "MRR"), (5, MOMENT, "MSS"), (6, MOMENT, "MTT"))
+    sigy = kf.get_number(data[0], STD8, block.long, 4)
+    if not edit:
+        if sigy is not None and sigy < 0:
+            ctx.error(f"*{block.name}: SIGY={sigy} < 0 names a yield CURVE OR "
+                      "TABLE by |SIGY| (R16 Vol II p.2-681); the manual does "
+                      "not document the table's value axis, so kunit cannot "
+                      "tell the two apart - convert this material manually "
+                      f"or resolve it with --curve {int(-sigy)}=<x>:<y>.")
+            return
+        for fi, dim, name in resultants:
+            v = kf.get_number(data[1], STD8, block.long, fi)
+            if v is not None and v < 0:
+                ctx.register_curve(int(-v), RATE, dim,
+                                   f"{block.name} {name}(strain rate)")
+        return
+    kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(DENSITY))    # RO
+    kf.scale_field(data[0], STD8, block.long, 2, ctx.fac(PRESSURE))   # E
+    if sigy is not None and sigy > 0:
+        kf.scale_field(data[0], STD8, block.long, 4, ctx.fac(PRESSURE))
+    kf.scale_field(data[0], STD8, block.long, 5, ctx.fac(PRESSURE))   # EH
+    kf.scale_field(data[0], STD8, block.long, 6, ctx.fac(TIME))       # DT
+    kf.scale_field(data[0], STD8, block.long, 7, ctx.fac(TIME))       # TFAIL
+    for fi, dim, name in resultants:
+        v = kf.get_number(data[1], STD8, block.long, fi)
+        if v is None or v <= 0:
+            if v is not None and v < 0:
+                ctx.note(f"*{block.name}: {name}={v} is a curve id "
+                         "(R16 Vol II p.2-682) - left unchanged.")
+            continue
+        kf.scale_field(data[1], STD8, block.long, fi, ctx.fac(dim))
+    if len(data) > 2:
+        ctx.warn(f"*{block.name}: {len(data) - 2} trailing card(s) beyond the "
+                 "2-card base layout left unscaled - the DAMAGE-FAILURE and "
+                 "UNIAXIAL options are separate keywords; verify manually.")
+    ctx.count(block.name)
+
+
+def h_mat_thermal_isotropic(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol II p.3-2..3-3 (*MAT_THERMAL_ISOTROPIC / MAT_T01).
+
+    Card 1 TMID TRO TGRLC TGMULT TLAT HLAT; Card 2 HC TC.  TRO is the thermal
+    density, TLAT the phase-change temperature, HC the specific heat and TC
+    the thermal conductivity.  HLAT is the latent heat: *MAT_T09 Remark 1
+    (p.3-36) defines it as the integral of the SPECIFIC heat over the
+    phase-change interval, i.e. energy per mass - the same (0,2,-2) signature
+    as HC, different meaning.
+
+    TGMULT is flag-dependent.  With TGRLC = 0 "thermal generation rate is the
+    constant multiplier, TGMULT", so the field IS the volumetric heat
+    generation rate (W/m3 in SI, Remark 2) - PWR_VOL.  With TGRLC != 0 the
+    rate comes from the curve and TGMULT is a plain multiplier on it (the
+    worked example on p.3-3 has TGMULT = 1.0 against curve ordinates of
+    1.43e7 W/m3), so scaling it would apply the factor twice.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    tgrlc = _numint(kf, data[0], STD8, block.long, 2) or 0
+    if not edit:
+        if tgrlc > 0:
+            ctx.register_curve(tgrlc, TIME, PWR_VOL,
+                               block.name + " generation rate(time)")
+        elif tgrlc < 0:
+            # abscissa is a temperature, which kunit never rescales
+            ctx.register_curve(-tgrlc, DIMLESS, PWR_VOL,
+                               block.name + " generation rate(temperature)")
+        return
+    kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(DENSITY))     # TRO
+    if tgrlc == 0:
+        kf.scale_field(data[0], STD8, block.long, 3, ctx.fac(PWR_VOL))  # TGMULT
+    kf.scale_field(data[0], STD8, block.long, 5, ctx.fac(SPEC_HEAT))   # HLAT
+    if kf.get_number(data[0], STD8, block.long, 4):
+        ctx.note(f"*{block.name}: temperature field left unchanged "
+                 "(temperatures are never rescaled)")
+    if len(data) > 1:
+        kf.scale_field(data[1], STD8, block.long, 0, ctx.fac(SPEC_HEAT))    # HC
+        kf.scale_field(data[1], STD8, block.long, 1, ctx.fac(THERM_COND))   # TC
+    if len(data) > 2:
+        ctx.warn(f"*{block.name}: {len(data) - 2} trailing card(s) beyond the "
+                 "2-card layout left unscaled - the _TD, _TD_LC and "
+                 "_PHASE_CHANGE variants are separate keywords; verify.")
+    ctx.count(block.name)
+
+
+def h_mat_057(block: Block, ctx) -> None:
+    """Scan-time table registration for *MAT_LOW_DENSITY_FOAM (MAT_057).
+
+    LCID (Card 1 field 3) may name a *DEFINE_TABLE instead of a curve; the
+    table's value axis is then a family of discrete TEMPERATURES and every
+    sub-curve is still nominal stress versus nominal strain (R16 Vol II
+    p.2-437).  spec.curves can only call register_curve, so the table form is
+    registered here with a dimensionless value axis.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    lcid = _numint(kf, data[0], STD8, block.long, 3)
+    if lcid:
+        ctx.register_table(lcid, DIMLESS, DIMLESS, PRESSURE)
 
 
 def h_section_beam(block: Block, ctx, edit: bool) -> None:
@@ -1031,6 +1885,346 @@ def h_initial_stress_solid(block: Block, ctx, edit: bool) -> None:
     ctx.count(block.name)
 
 
+def h_define_vector(block: Block, ctx, edit: bool) -> None:
+    """*DEFINE_VECTOR: VID XT YT ZT XH YH ZH CID, repeating.
+
+    Normally the tail and head are two POINTS, so all six values are lengths.
+    But a vector named by the VID field of
+    *ALE_STRUCTURED_MESH_VOLUME_FILLING is not geometry at all: "Fields 2 to
+    5 (XT, YT, ZT) of the *DEFINE_VECTOR card are used to define the initial
+    translational velocities" (R16 Vol I p.4-125).  Scaling those as lengths
+    is wrong by exactly the time-unit ratio - 1000x converting s to ms - and
+    is silent, which is why the S-ALE handler records such ids at scan time
+    and this handler consults the set.  A vector in that role that also
+    carries a non-zero HEAD is genuinely ambiguous and is refused.
+    """
+    if not edit:
+        return
+    kf = ctx.kf
+    for li in block.data:
+        vid = _numint(kf, li, STD8, block.long, 0)
+        if vid in ctx.sale_vel_vectors:
+            if any(kf.get_number(li, STD8, block.long, fi)
+                   for fi in (4, 5, 6)):
+                ctx.error(f"*{block.name}: vector {vid} is referenced as the "
+                          "VID of *ALE_STRUCTURED_MESH_VOLUME_FILLING, where "
+                          "XT/YT/ZT are initial VELOCITIES (R16 Vol I "
+                          "p.4-125), but it also carries a non-zero head "
+                          "XH/YH/ZH - the same vector cannot be both a "
+                          "velocity and a geometric direction; split it.")
+                return
+            for fi in (1, 2, 3):
+                kf.scale_field(li, STD8, block.long, fi, ctx.fac(VELOCITY))
+            ctx.note(f"*{block.name}: vector {vid} feeds an S-ALE volume "
+                     "filling, so XT/YT/ZT were scaled as VELOCITIES, not "
+                     "lengths (R16 Vol I p.4-125).")
+            continue
+        for fi in range(1, 7):
+            kf.scale_field(li, STD8, block.long, fi, ctx.fac(LENGTH))
+    ctx.count(block.name)
+
+
+def h_define_box(block: Block, ctx, edit: bool) -> None:
+    """*DEFINE_BOX: BOXID XMN XMX YMN YMX ZMN ZMX, normally real coordinates.
+
+    A box referenced by an *ALE_STRUCTURED_MESH_VOLUME_FILLING card with
+    GEOM = BOXCPT holds S-ALE CONTROL-POINT INDICES instead ("the box is
+    defined using S-ALE control points"; the manual's own example on
+    R16 Vol I p.4-129 is '*DEFINE_BOX 1 8 15 8 15 8 15', where 8 and 15 are
+    indices).  Scaling those by the length factor would move the box to
+    nonsense indices, so such ids are exempted.  GEOM = BOXCOR boxes are
+    true coordinates and keep the normal scaling.
+    """
+    if not edit:
+        return
+    kf = ctx.kf
+    data = list(block.data)
+    if not data:
+        return
+    boxid = _numint(kf, data[0], STD8, block.long, 0)
+    if boxid in ctx.sale_index_boxes:
+        ctx.note(f"*{block.name}: box {boxid} is referenced with "
+                 "GEOM=BOXCPT, so its six values are S-ALE control-point "
+                 "INDICES, not coordinates (R16 Vol I p.4-126) - left "
+                 "unchanged.")
+    else:
+        for fi in range(1, 7):
+            kf.scale_field(data[0], STD8, block.long, fi, ctx.fac(LENGTH))
+    if len(data) > 1:
+        ctx.warn(f"*{block.name}: {len(data) - 1} trailing card(s) beyond the "
+                 "single box card left unscaled - verify manually.")
+    ctx.count(block.name)
+
+
+def x_ale_ref_group(block: Block, ctx) -> None:
+    """Guard for the one undocumented column of *ALE_REFERENCE_SYSTEM_GROUP.
+
+    Card 2 field 5 is blank in the R16 and R17 card tables, but the manual's
+    own Example 2 header (p.4-87) labels it SMOOTHVMX - a name that reads
+    like a maximum smoothing VELOCITY.  Every documented example leaves it
+    empty; a deck that writes there gets a loud warning rather than a silent
+    pass-through."""
+    kf = ctx.kf
+    data = list(block.data)
+    if len(data) > 1 and kf.get_number(data[1], STD8, block.long, 5):
+        ctx.warn(f"*{block.name}: Card 2 field 6 is blank in the R16/R17 "
+                 "card table but this deck writes a value there (the "
+                 "manual's Example 2 header calls it SMOOTHVMX, which reads "
+                 "like a velocity) - left UNSCALED, verify manually.")
+
+
+def h_ale_structured_fsi(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.4-96..4-101 (*ALE_STRUCTURED_FSI[_ABEXT|_ABINT]).
+
+    Card 1 LSTRSID ALESID LSTRSTYP ALESTYP - - - MCOUP is all ids and flags.
+    Card 2 START END PFAC FRIC ILVL FLIP DECAY OFFSET: only START and END are
+    times.  PFAC > 0 is a fraction of the estimated critical stiffness,
+    FRIC > 0 a Coulomb coefficient, DECAY a factor that scales the FSI
+    pressure at the gas front and OFFSET > 0 a fraction of the Lagrange
+    segment thickness - all dimensionless.  Each of the three, when negative,
+    names a curve (or, for FRIC, a *DEFINE_TABLE) that carries the physics
+    instead, so the ids must survive untouched and the referenced data gets
+    the dimensions registered here.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 2:
+        if edit:
+            ctx.count(block.name)
+        return
+    c2 = data[1]
+    if not edit:
+        pfac = kf.get_number(c2, STD8, block.long, 2)
+        if pfac is not None and pfac < 0:
+            ctx.register_curve(int(-pfac), LENGTH, PRESSURE,
+                               block.name + " PFAC p(penetration)")
+        fric = kf.get_number(c2, STD8, block.long, 3)
+        if fric is not None and fric < 0:
+            # table values are coupling pressures, each sub-curve is the
+            # friction coefficient versus relative velocity
+            ctx.register_table(int(-fric), PRESSURE, VELOCITY, DIMLESS)
+        offset = kf.get_number(c2, STD8, block.long, 7)
+        if offset is not None and offset < 0:
+            ctx.register_curve(int(-offset), TIME, LENGTH,
+                               block.name + " OFFSET(time)")
+        return
+    for fi in (0, 1):                                        # START END
+        kf.scale_field(c2, STD8, block.long, fi, ctx.fac(TIME))
+    if len(data) > 2:
+        ctx.warn(f"*{block.name}: {len(data) - 2} trailing card(s) beyond "
+                 "Card 2 left unscaled - verify manually.")
+    ctx.count(block.name)
+
+
+def h_ale_control_points(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.4-106..4-112 (*ALE_STRUCTURED_MESH_CONTROL_POINTS).
+
+    Card 1 is a normal 8x10 card: CPID - ICASE SFO - OFFO.  SFO and OFFO
+    apply as "Ordinate value = SFO x (Defined value + OFFO)" (Remark 1,
+    p.4-108), so the length factor belongs on X and OFFO while SFO, a pure
+    scale factor, must stay - scaling SFO instead would apply the factor
+    twice.
+
+    The point cards that follow use THREE 20-character fields, not the 8x10
+    layout: N (the control-point index, never scaled), X (a position) and a
+    third value whose dimension flips with ICASE - a dimensionless
+    progressive-spacing RATIO for ICASE = 0 (dl(n+1) = dl(n)*(1+RATIO)) but
+    the element LENGTH XL for ICASE = 1 or 2.  Blank fields are common
+    (ICASE = 2 leaves X blank on all but the base node) and stay blank.
+    """
+    if not edit:
+        return
+    kf = ctx.kf
+    data = list(block.data)
+    if not data:
+        return
+    icase = _numint(kf, data[0], STD8, block.long, 2) or 0
+    if icase not in (0, 1, 2):
+        ctx.error(f"*{block.name}: ICASE={icase} is not documented "
+                  "(0, 1 or 2, R16 Vol I p.4-107) - refusing to guess "
+                  "whether the third column is a ratio or a length.")
+        return
+    kf.scale_field(data[0], STD8, block.long, 5, ctx.fac(LENGTH))   # OFFO
+    for li in data[1:]:
+        # In the documented 20-char layout the right-aligned integer N ends
+        # in columns 11-20, so columns 1-10 are blank; a 10-char deck puts N
+        # in columns 1-10 instead.
+        widths = (20, 20, 20) if not kf.lines[li][:10].strip() else (10, 10, 10)
+        kf.scale_field(li, widths, block.long, 1, ctx.fac(LENGTH))   # X
+        if icase:
+            kf.scale_field(li, widths, block.long, 2, ctx.fac(LENGTH))  # XL
+    ctx.count(block.name)
+
+
+# *ALE_STRUCTURED_MESH_VOLUME_FILLING Card 2 by GEOM (R16 Vol I p.4-126,
+# R17 Vol I p.4-127).  Card 2 is GEOM IN/OUT E1 E2 E3 E4 E5 at 0-based
+# 0..6; only the E fields listed here are dimensional.
+_VF_GEOM: Dict[str, Dict[int, Dim]] = {
+    "ALL": {},
+    "PART": {3: LENGTH},        # E1 part id, E2 offset along the normals
+    "PARTSET": {3: LENGTH},
+    "SEGSET": {3: LENGTH},
+    "PLANE": {},                # E1/E2 are node ids
+    "CYLINDER": {4: LENGTH, 5: LENGTH},   # E1/E2 node ids, E3/E4 radii
+    "BOXCOR": {},               # E1 is a *DEFINE_BOX of real coordinates
+    "BOXCPT": {},               # E1 is a *DEFINE_BOX of control-point indices
+    "ELLIPSOID": {3: LENGTH, 4: LENGTH, 5: LENGTH},  # rx ry rz
+}
+
+
+def h_ale_volume_filling(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.4-124..4-129 (*ALE_STRUCTURED_MESH_VOLUME_FILLING).
+
+    Two cards per filling instruction, several instructions in sequence.
+    Card 1 MSHID - AMMGTO - NSAMPLE - - VID: ids, a sampling count and an
+    alphanumeric AMMG NAME (never numeric-parsed), plus VID - a
+    *DEFINE_VECTOR whose XT/YT/ZT are INITIAL VELOCITIES here, recorded so
+    h_define_vector scales them correctly.
+    Card 2 GEOM IN/OUT E1..E5: E1-E5 are typed "I or F" and their meaning -
+    hence their dimension - is selected by the alphanumeric GEOM keyword in
+    field 1 of the same card, which is why no static table can express it.
+    GEOM = BOXCPT additionally means the referenced *DEFINE_BOX holds
+    control-point INDICES, recorded so h_define_box leaves it alone.
+
+    SPHERE appears in the R16 prose list but has no row in the geometry
+    table and is gone in R17, so it is refused rather than guessed.
+    """
+    kf = ctx.kf
+    data = list(block.data)
+    if len(data) % 2:
+        ctx.error(f"*{block.name}: {len(data)} data cards is not a multiple "
+                  "of the 2-card filling instruction (R16 Vol I p.4-124) - "
+                  "the layout was not understood, refusing to guess.")
+        return
+    for i in range(0, len(data), 2):
+        c1, c2 = data[i], data[i + 1]
+        geom = kf.fields(c2, STD8, block.long)[0][0].strip().upper()
+        dims = _VF_GEOM.get(geom)
+        if dims is None:
+            ctx.error(f"*{block.name}: GEOM={geom!r} is not in the R16/R17 "
+                      "geometry table (ALL, PART, PARTSET, SEGSET, PLANE, "
+                      "CYLINDER, BOXCOR, BOXCPT, ELLIPSOID; SPHERE is listed "
+                      "in the R16 prose but has no card row and is gone in "
+                      "R17) - refusing to guess the E1..E5 dimensions.")
+            return
+        if not edit:
+            vid = _numint(kf, c1, STD8, block.long, 7)
+            if vid:
+                ctx.sale_vel_vectors.add(vid)
+            if geom == "BOXCPT":
+                boxid = _numint(kf, c2, STD8, block.long, 2)
+                if boxid:
+                    ctx.sale_index_boxes.add(boxid)
+            continue
+        for fi, dim in dims.items():
+            kf.scale_field(c2, STD8, block.long, fi, ctx.fac(dim))
+    if edit:
+        ctx.count(block.name)
+
+
+# *INITIAL_VOLUME_FRACTION_GEOMETRY Card 3 by CNTTYP (R16 Vol I
+# p.28-140..28-144).  Note XOFFST moves from field 4 (CNTTYP=1) to field 3
+# (CNTTYP=2), and the plane's direction cosines must never be scaled.
+_IVFG_CNTTYP: Dict[int, Dict[int, Dim]] = {
+    1: {3: LENGTH},                                  # SID STYPE NORMDIR XOFFST
+    2: {2: LENGTH},                                  # SGSID NORMDIR XOFFST
+    3: {0: LENGTH, 1: LENGTH, 2: LENGTH},            # X0 Y0 Z0 + cosines
+    4: {i: LENGTH for i in range(8)},                # cone: 2 centres + 2 radii
+    5: {i: LENGTH for i in range(6)},                # box: min/max corners
+    6: {i: LENGTH for i in range(4)},                # sphere: centre + radius
+}
+
+
+def h_initial_volume_fraction_geometry(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.28-136..28-146 (*INITIAL_VOLUME_FRACTION_GEOMETRY).
+
+    Card 1 FMSID FMIDTYP BAMMG NTRACE is ids and a sampling count (BAMMG may
+    be an AMMG NAME string under S-ALE, so it is never numeric-parsed).  It
+    is followed by PAIRS of cards until the next keyword: a container card
+    CNTTYP FILLOPT FAMMG VX VY VZ - whose VX/VY/VZ are the easily-missed
+    initial VELOCITY of that AMMG - and a geometry card whose whole layout is
+    selected by CNTTYP (1 part/part-set surface, 2 segment set, 3 plane,
+    4 cone, 5 box, 6 sphere, 7 *DEFINE_FUNCTION).
+
+    CNTTYP = 7 is refused for the same reason *DEFINE_FUNCTION is a hard
+    flag: a free-form expression of (x, y, z) cannot be auto-scaled.  An odd
+    number of trailing cards means the pairing assumption is wrong (Remark 1,
+    p.28-144, requires a Card 3 for every Card 2) and is refused too.
+    """
+    if not edit:
+        return
+    kf = ctx.kf
+    data = list(block.data)
+    if not data:
+        return
+    body = data[1:]
+    if len(body) % 2:
+        ctx.error(f"*{block.name}: {len(body)} cards after Card 1 is not a "
+                  "multiple of the (container, geometry) pair required by "
+                  "Remark 1 (R16 Vol I p.28-144) - refusing to guess.")
+        return
+    for i in range(0, len(body), 2):
+        cont, geom = body[i], body[i + 1]
+        cnttyp = _numint(kf, cont, STD8, block.long, 0) or 0
+        if cnttyp == 7:
+            ctx.error(f"*{block.name}: CNTTYP=7 fills the container from a "
+                      "*DEFINE_FUNCTION (R16 Vol I p.28-144), whose "
+                      "free-form expression cannot be auto-scaled - convert "
+                      "this filling manually.")
+            return
+        dims = _IVFG_CNTTYP.get(cnttyp)
+        if dims is None:
+            ctx.error(f"*{block.name}: CNTTYP={cnttyp} is not documented "
+                      "(1-7, R16 Vol I p.28-138) - refusing to guess.")
+            return
+        for fi in (3, 4, 5):                                  # VX VY VZ
+            kf.scale_field(cont, STD8, block.long, fi, ctx.fac(VELOCITY))
+        for fi, dim in dims.items():
+            kf.scale_field(geom, STD8, block.long, fi, ctx.fac(dim))
+    ctx.count(block.name)
+
+
+def h_boundary_sale_mesh_face(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.5-126..5-128 (*BOUNDARY_SALE_MESH_FACE).
+
+    Repeating cards BCTYPE MSHID NEGX POSX NEGY POSY NEGZ POSZ.  BCTYPE is
+    alphanumeric (FIXED, NOFLOW, SYM, NONREFL, FLOWVEL, PRES, AMBIENT) and
+    the six face fields are 0/1 flags for the flag-like BCTYPEs - but for
+    PRES and FLOWVEL a value greater than zero IS the id of the
+    *DEFINE_CURVE controlling that face ("faces loaded by time-dependent
+    pressures" / "nodes constrained by time-dependent velocities"), so the
+    curve dimensions have to be registered or the referenced curve is
+    emitted unchanged with only an 'unreferenced' warning.  Nothing on the
+    card is ever scaled.
+
+    For AMBIENT the face value is a PACKED integer, MMG + 100*LCID1 +
+    10000*LCID2; unpacking it reliably is not documented well enough to risk,
+    so a packed value carrying curve ids is refused instead.
+    """
+    if edit:
+        ctx.count(block.name)
+        return
+    kf = ctx.kf
+    for li in block.data:
+        bctype = kf.fields(li, STD8, block.long)[0][0].strip().upper()
+        ydim = {"PRES": PRESSURE, "FLOWVEL": VELOCITY}.get(bctype)
+        for fi in range(2, 8):
+            v = _numint(kf, li, STD8, block.long, fi)
+            if not v or v <= 0:
+                continue
+            if ydim is not None:
+                ctx.register_curve(v, TIME, ydim,
+                                   f"{block.name} {bctype} face")
+            elif bctype == "AMBIENT" and v >= 100:
+                ctx.error(f"*{block.name}: BCTYPE=AMBIENT face value {v} "
+                          "packs load-curve ids as MMG + 100*LCID1 + "
+                          "10000*LCID2 (R16 Vol I p.5-127); kunit does not "
+                          "unpack it, so the referenced curves would be left "
+                          f"unscaled - resolve them with --curve, or convert "
+                          "this boundary manually.")
+                return
+
+
 def h_lagrange_in_solid(block: Block, ctx, edit: bool) -> None:
     kf = ctx.kf
     data = _strip_title(block, list(block.data))
@@ -1045,6 +2239,119 @@ def h_lagrange_in_solid(block: Block, ctx, edit: bool) -> None:
             kf.scale_field(data[1], STD8, block.long, 0, ctx.fac(TIME))
             kf.scale_field(data[1], STD8, block.long, 1, ctx.fac(TIME))
         ctx.count("CONSTRAINED_LAGRANGE_IN_SOLID")
+
+
+def h_joint_stiffness_generalized(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.10-88..10-100 (*CONSTRAINED_JOINT_STIFFNESS_GENERALIZED).
+
+    Exactly four cards.  Card 1 JSID PIDA PIDB CIDA CIDB JID RPS - ids plus
+    the relative penalty-stiffness factor, nothing dimensional.  Card 2b.1
+    LCIDPH LCIDT LCIDPS DLCIDPH DLCIDT DLCIDPS - moment-versus-rotation and
+    damping-moment-versus-rotation-rate curve ids (abscissae in RADIANS and
+    radians per unit time, so DIMLESS and ANG_VEL; ordinates MOMENT).
+    Card 2b.2 ESPH FMPH EST FMT ESPS FMPS - the ES* elastic stiffnesses are
+    "per unit radian", i.e. MOMENT, and are scaled unconditionally; the FM*
+    frictional moment limits are typed "F/I" and sign-overloaded: "LT.0:
+    -FMxx is the load curve or table ID defining the yield moment as a
+    function of rotation" (p.10-98), so a negative value is an id that must
+    stay byte-identical.  Card 2b.3 holds six stop angles in degrees.
+
+    The table form of a negative FM* requires JID on Card 1 ("a table permits
+    the moment to also be a function of the joint reaction force and requires
+    the specification of JID"), and kunit cannot resolve a table id through
+    register_curve, so FM* < 0 with a non-zero JID is refused rather than
+    guessed.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 4:
+        ctx.error(f"*{block.name}: expected 4 cards (ids, curve ids, "
+                  f"stiffness/friction, stop angles), found {len(data)}.")
+        return
+    jid = _numint(kf, data[0], STD8, block.long, 5) or 0
+    if not edit:
+        for fi in (0, 1, 2):                       # LCIDPH LCIDT LCIDPS
+            lcid = _numint(kf, data[1], STD8, block.long, fi)
+            if lcid:
+                ctx.register_curve(lcid, DIMLESS, MOMENT,
+                                   block.name + " moment(rotation)")
+        for fi in (3, 4, 5):                       # DLCIDPH DLCIDT DLCIDPS
+            lcid = _numint(kf, data[1], STD8, block.long, fi)
+            if lcid:
+                ctx.register_curve(lcid, ANG_VEL, MOMENT,
+                                   block.name + " damping moment(rate)")
+    for fi in (1, 3, 5):                           # FMPH FMT FMPS
+        v = kf.get_number(data[2], STD8, block.long, fi)
+        if v is None or v >= 0:
+            continue
+        if jid:
+            ctx.error(f"*{block.name}: FM field {fi + 1} = {v} is a negative "
+                      f"curve OR table id and JID={jid} is set, so the "
+                      "manual's table form is enabled (R16 Vol I p.10-98) - "
+                      "kunit cannot resolve a *DEFINE_TABLE reference here; "
+                      "convert this joint stiffness manually.")
+            return
+        if not edit:
+            ctx.register_curve(int(-v), DIMLESS, MOMENT,
+                               block.name + " yield moment(rotation)")
+    if not edit:
+        return
+    for fi in (0, 2, 4):                           # ESPH EST ESPS
+        kf.scale_field(data[2], STD8, block.long, fi, ctx.fac(MOMENT))
+    for fi in (1, 3, 5):                           # FMPH FMT FMPS
+        v = kf.get_number(data[2], STD8, block.long, fi)
+        if v is not None and v < 0:
+            ctx.note(f"*{block.name}: FM field {fi + 1} = {v} is a curve id "
+                     "(R16 Vol I p.10-98) - left unchanged, the referenced "
+                     "curve is scaled instead.")
+            continue
+        kf.scale_field(data[2], STD8, block.long, fi, ctx.fac(MOMENT))
+    if len(data) > 4:
+        ctx.warn(f"*{block.name}: {len(data) - 4} trailing card(s) beyond the "
+                 "4-card GENERALIZED layout left unscaled - verify manually.")
+    ctx.count(block.name)
+
+
+def h_shell_in_solid(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.10-178..10-180 (*CONSTRAINED_SHELL_IN_SOLID[_PENALTY]).
+
+    Card 1 SHSID SSID SHSTYP SSTYP holds ids only.  The optional Card 2 is
+    START END - - - PSSF: normally two coupling times, with PSSF a penalty
+    spring stiffness SCALE factor (the stiffness itself is derived from the
+    geometric mean of the shell and solid bulk moduli, so PSSF is a pure
+    ratio).  But END = -9999 is a sentinel: "If END = -9999, START is
+    interpreted as the curve or table ID defining multiple pairs of
+    start-time and end-time" (p.10-180).  Scaling that pair would both
+    destroy the curve reference and turn -9999 into a value LS-DYNA reads
+    under the *other* branch ("negative END indicates that coupling is
+    inactive during dynamic relaxation"), so both fields are left alone and
+    the referenced curve - whose two axes are BOTH times - is scaled instead.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 2:                    # Card 2 is optional and often absent
+        if edit:
+            ctx.count(block.name)
+        return
+    end = kf.get_number(data[1], STD8, block.long, 1)
+    if end is not None and end == -9999:
+        start = _numint(kf, data[1], STD8, block.long, 0)
+        if not edit:
+            if start:
+                ctx.register_curve(start, TIME, TIME,
+                                   block.name + " start/end time pairs")
+        else:
+            ctx.note(f"*{block.name}: END=-9999 makes START={start} a curve "
+                     "id holding start/end time pairs (R16 Vol I p.10-180) - "
+                     "both fields left unchanged, the curve is scaled.")
+    elif edit:
+        for fi in (0, 1):                                    # START END
+            kf.scale_field(data[1], STD8, block.long, fi, ctx.fac(TIME))
+    if edit:
+        if len(data) > 2:
+            ctx.warn(f"*{block.name}: {len(data) - 2} trailing card(s) beyond "
+                     "Card 2 left unscaled - verify manually.")
+        ctx.count(block.name)
 
 
 def h_database_dt(block: Block, ctx, edit: bool) -> None:
@@ -1099,6 +2406,61 @@ def h_icfd_prescribed_pre(block: Block, ctx, edit: bool) -> None:
             kf.scale_field(li, STD8, block.long, 4, ctx.fac(TIME))  # BIRTH
     if edit:
         ctx.count(block.name)
+
+
+def h_icfd_prescribed_temp(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol III p.7-28 (*ICFD_BOUNDARY_PRESCRIBED_TEMP), repeating cards
+    PID LCID SF DEATH BIRTH.  The LCID curve is temperature versus time, so
+    only its abscissa is dimensional; DEATH/BIRTH are times and SF carries
+    the temperature amplitude against a normalised curve.
+
+    Registering the ordinate as TEMP is what makes a SHARED curve safe: real
+    ICFD decks point one unit-amplitude curve at both a prescribed velocity
+    and a prescribed temperature, and without this registration the curve
+    would silently be scaled by the velocity factor alone - multiplying the
+    imposed fluid temperature by that factor.  With both demands registered
+    h_define_curve refuses the deck instead (or, if every ordinate is zero,
+    downgrades it to a warning)."""
+    kf = ctx.kf
+    for li in block.data:
+        lcid = _numint(kf, li, STD8, block.long, 1)
+        if not edit:
+            if lcid:
+                ctx.register_curve(lcid, TIME, TEMP, block.name)
+        else:
+            kf.scale_field(li, STD8, block.long, 3, ctx.fac(TIME))  # DEATH
+            kf.scale_field(li, STD8, block.long, 4, ctx.fac(TIME))  # BIRTH
+    if edit:
+        ctx.count(block.name)
+
+
+def h_icfd_initial(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol III p.7-141 (*ICFD_INITIAL), repeating cards PID Vx Vy Vz T P
+    - DFUNC.  DFUNC reinterprets the SAME columns on the SAME card: with
+    DFUNC = 1 "all previous flags for initial velocity, pressure and
+    temperature now refer to *DEFINE_FUNCTION IDs", i.e. fields 1-5 become
+    bare integer ids that must not be rescaled.  Such a deck also needs
+    *DEFINE_FUNCTION, which is already a hard flag, but the refusal is made
+    explicit here rather than left to depend on that."""
+    if not edit:
+        return
+    kf = ctx.kf
+    for li in block.data:
+        dfunc = _numint(kf, li, STD8, block.long, 7) or 0
+        if dfunc:
+            ctx.error(f"*{block.name}: DFUNC={dfunc} makes the velocity, "
+                      "temperature and pressure columns *DEFINE_FUNCTION ids "
+                      "(R16 Vol III p.7-141) - they must not be rescaled and "
+                      "the functions themselves cannot be auto-converted; "
+                      "convert this initial condition manually.")
+            return
+        for fi in (1, 2, 3):                                  # Vx Vy Vz
+            kf.scale_field(li, STD8, block.long, fi, ctx.fac(VELOCITY))
+        kf.scale_field(li, STD8, block.long, 5, ctx.fac(PRESSURE))     # P
+        if kf.get_number(li, STD8, block.long, 4):                     # T
+            ctx.note(f"*{block.name}: temperature field left unchanged "
+                     "(temperatures are never rescaled)")
+    ctx.count(block.name)
 
 
 def h_icfd_control_time(block: Block, ctx, edit: bool) -> None:
@@ -1671,6 +3033,663 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
     ctx.count(block.name + (" (legacy R8/R10 layout)" if legacy else ""))
 
 
+def _blank_field(kf: KFile, li: int, widths, long, fi: int) -> bool:
+    """True when field `fi` of a fixed-format card holds nothing at all.
+
+    Several frequency-domain cards are identified by a structurally BLANK
+    first column (*FREQUENCY_DOMAIN_SSD Card 3, *..._ACOUSTIC_BEM Card 4,
+    *..._ACOUSTIC_FEM Card 2), which a written 0 would not satisfy.
+    """
+    fl = kf.fields(li, widths, long)
+    return fi >= len(fl) or not fl[fi][0].strip()
+
+
+def _prev_header(kf: KFile, li: int) -> str:
+    """Nearest preceding '$' comment line, upper-cased ('' if none).
+
+    LS-PrePost labels every card it writes with a '$#' header naming the
+    variables; that label is the only remaining signal when a structurally
+    blank card is dropped from block.data (blank lines are not data lines).
+    """
+    for j in range(li - 1, -1, -1):
+        s = kf.lines[j].strip()
+        if not s:
+            continue
+        if s.startswith("$"):
+            return s.upper()
+        return ""
+    return ""
+
+
+# *FREQUENCY_DOMAIN_SSD Card 7 excitation ordinate by VAD (R16 Vol I
+# p.23-111..23-112).  0/1 are force and pressure, 2-4 base motion, 5-7 the
+# large-mass enforced equivalents, 8-11 the rotational set, 12-14 the
+# DIRECT-only enforced motions.
+_SSD_VAD_DIM: Dict[int, Dim] = {
+    0: FORCE, 1: PRESSURE,
+    2: VELOCITY, 3: ACCEL, 4: LENGTH,
+    5: VELOCITY, 6: ACCEL, 7: LENGTH,
+    8: MOMENT, 9: ANG_VEL, 10: ANG_ACCEL, 11: DIMLESS,
+    12: VELOCITY, 13: ACCEL, 14: LENGTH,
+}
+
+
+def h_freq_ssd(block: Block, ctx, edit: bool) -> None:
+    """*FREQUENCY_DOMAIN_SSD{_ERP,_FATIGUE,_DIRECT,_FRF}, R16 Vol I
+    p.23-104..23-116.
+
+    Card 1 MDMIN MDMAX FNMIN FNMAX RESTMD RESTDP LCFLAG RELATV - FNMIN/FNMAX
+    are the natural frequencies admitted to the modal superposition.
+    Card 2 DAMPF LCDAM LCTYP DMPMAS DMPSTF DMPFLG - DAMPF is a modal damping
+    RATIO, DMPMAS the mass-proportional Rayleigh alpha (1/time) and DMPSTF
+    the stiffness-proportional beta (time) of C = alpha*M + beta*K
+    (Remark 5c, p.23-114).
+    Card 3 <blank> ISTRESS MEMORY NERP STRTYP NOUT NOTYP NOVA - entirely
+    flags; its first column is structurally blank, which is what identifies
+    it.
+    ERP adds Card 4 RO C ERPRLF ERPREF RADEFF (density, sound speed, a
+    dimensionless radiation loss factor that is a curve id when negative, and
+    the ERP reference POWER the dB scale is referred to) plus NERP copies of
+    Card 5 PID PTYP.
+    Card 7 NID NTYP DOF VAD LC1 LC2 SF VID repeats to the end of the block;
+    SF is a plain multiplier.  FATIGUE appends Card 8 LCFTG after them, so it
+    is the LAST data line of the block.
+
+    Only the excitation curves carry physics that a table cannot express:
+    LC1's ordinate follows VAD and LC2 is a phase angle in degrees when
+    LCFLAG = 0 but the imaginary part - same dimension as LC1 - when
+    LCFLAG = 1 (Remark 11, p.23-115).
+    """
+    kf = ctx.kf
+    opts = block.name.split("_")
+    erp = "ERP" in opts
+    fatigue = "FATIGUE" in opts
+    data = list(block.data)
+    if len(data) < 3:
+        ctx.error(f"*{block.name}: expected at least Cards 1-3, found "
+                  f"{len(data)} data card(s).")
+        return
+    c1, c2 = data[0], data[1]
+
+    # ── locate the excitation cards ──────────────────────────────────────
+    if _blank_field(kf, data[2], STD8, block.long, 0):
+        start = 3                                  # data[2] is Card 3
+    elif "NID" in _prev_header(kf, data[2]) and "VAD" in _prev_header(
+            kf, data[2]):
+        # Legacy LS-PrePost short form writes Card 3 as an entirely empty
+        # line, which is not a data line - the excitation cards start here.
+        start = 2
+        ctx.note(f"*{block.name}: Card 3 is written as an empty line "
+                 "(legacy LS-PrePost short form) and carries no data - the "
+                 "excitation cards were located from the '$#' header.")
+    else:
+        ctx.error(f"*{block.name}: the third data card has a non-blank first "
+                  "column, but R16 Card 3 begins with a blank field "
+                  "(p.23-107).  This is either a pre-R9 deck whose Card 3 "
+                  "holds FMIN/FMAX/NFREQ (frequencies that must be rescaled) "
+                  "or a shifted layout - refusing to guess; convert this "
+                  "block manually.")
+        return
+    if erp:
+        if len(data) <= start:
+            ctx.error(f"*{block.name}: the ERP option requires Card 4 "
+                      "(RO C ERPRLF ERPREF RADEFF) - not found.")
+            return
+        c4 = data[start]
+        nerp = max(_numint(kf, data[2], STD8, block.long, 3) or 0, 0)
+        start += 1 + nerp                          # Card 4 + NERP x Card 5
+    else:
+        c4 = None
+    c8 = None
+    if fatigue and len(data) > start:
+        c8 = data[-1]                              # LCFTG is the last line
+    loads = data[start:len(data) - (1 if c8 is not None else 0)]
+
+    lcflag = _numint(kf, c1, STD8, block.long, 6) or 0
+
+    # ── scan pass: curve registration ────────────────────────────────────
+    if not edit:
+        lcdam = _numint(kf, c2, STD8, block.long, 1)
+        if lcdam:
+            lctyp = _numint(kf, c2, STD8, block.long, 2) or 0
+            xdim = {0: FREQ, 1: DIMLESS}.get(lctyp)
+            if xdim is None:
+                ctx.error(f"*{block.name}: LCTYP={lctyp} is not documented "
+                          "(R16 Vol I p.23-106).")
+            else:
+                ctx.register_curve(lcdam, xdim, DIMLESS,
+                                   block.name + " LCDAM")
+        if c4 is not None:
+            erprlf = kf.get_number(c4, STD8, block.long, 2)
+            if erprlf is not None and erprlf < 0:
+                ctx.register_curve(int(-erprlf), FREQ, DIMLESS,
+                                   block.name + " ERPRLF(frequency)")
+        for li in loads:
+            vad = _numint(kf, li, STD8, block.long, 3) or 0
+            ydim = _SSD_VAD_DIM.get(vad)
+            if ydim is None:
+                ctx.error(f"*{block.name}: VAD={vad} is not documented "
+                          "(R16 Vol I p.23-111) - refusing to guess.")
+                return
+            lc1 = _numint(kf, li, STD8, block.long, 4)
+            lc2 = _numint(kf, li, STD8, block.long, 5)
+            if lc1:
+                ctx.register_curve(lc1, FREQ, ydim, block.name + " LC1")
+            if lc2:
+                # LCFLAG=0: LC2 is a phase angle in degrees; LCFLAG=1: it is
+                # the imaginary part and carries LC1's dimension.
+                ctx.register_curve(lc2, FREQ,
+                                   ydim if lcflag == 1 else DIMLESS,
+                                   block.name + " LC2")
+        if c8 is not None:
+            lcftg = _numint(kf, c8, STD8, block.long, 0)
+            if lcftg:
+                ctx.register_curve(lcftg, FREQ, TIME,
+                                   block.name + " LCFTG (duration)")
+        return
+
+    # ── edit pass ────────────────────────────────────────────────────────
+    for fi in (2, 3):                                       # FNMIN FNMAX
+        kf.scale_field(c1, STD8, block.long, fi, ctx.fac(FREQ))
+    kf.scale_field(c2, STD8, block.long, 3, ctx.fac(FREQ))   # DMPMAS (alpha)
+    kf.scale_field(c2, STD8, block.long, 4, ctx.fac(TIME))   # DMPSTF (beta)
+    if c4 is not None:
+        kf.scale_field(c4, STD8, block.long, 0, ctx.fac(DENSITY))   # RO
+        kf.scale_field(c4, STD8, block.long, 1, ctx.fac(VELOCITY))  # C
+        kf.scale_field(c4, STD8, block.long, 3, ctx.fac(POWER))     # ERPREF
+    ctx.count(block.name)
+
+
+def h_freq_frf(block: Block, ctx, edit: bool) -> None:
+    """*FREQUENCY_DOMAIN_FRF (blank option), R16 Vol I p.23-41..23-56.
+
+    Card 1a N1 N1TYP DOF1 VAD1 VID1 FNMAX MDMIN MDMAX - FNMAX is the maximum
+    NATURAL frequency taken into the FRF sum.  VAD1 = 12 (torsion) inserts
+    Card 1a.1 (N11 N11TYP) here, shifting everything after it.
+    Card 2 DAMPF LCDAM LCTYP DMPMAS DMPSTF - the Rayleigh pair again (alpha
+    at field 3 is 1/time, beta at field 4 is a time); note there is no
+    DMPFLG, unlike *FREQUENCY_DOMAIN_SSD.
+    Card 3 N2 N2TYP DOF2 VAD2 VID2 RELATV - ids and flags only.
+    Card 4 FMIN FMAX NFREQ FSPACE LCFREQ RESTRT OUTPUT - FMIN/FMAX are the
+    FRF output frequencies, documented as cycles/time.  Card 4 is the last
+    card of the blank option.
+
+    The excitation is a unit load, so there are no excitation curves; LCDAM
+    is a modal damping ratio versus frequency (LCTYP=0) or mode number
+    (LCTYP=1).  LCFREQ is refused for the same reason h_database_frequency
+    refuses it: the manual never says which curve column holds the output
+    frequencies.
+    """
+    kf = ctx.kf
+    data = list(block.data)
+    if len(data) < 4:
+        ctx.error(f"*{block.name}: expected 4 cards (1a, 2, 3, 4), found "
+                  f"{len(data)} - the SUBCASE option is a separate keyword.")
+        return
+    vad1 = _numint(kf, data[0], STD8, block.long, 3) or 0
+    off = 1 if vad1 == 12 else 0            # Card 1a.1 (N11 N11TYP)
+    if len(data) < 4 + off:
+        ctx.error(f"*{block.name}: VAD1=12 (torsion) inserts Card 1a.1 "
+                  "(R16 Vol I p.23-44), so 5 cards are expected - found "
+                  f"{len(data)}.")
+        return
+    c2, c4 = data[1 + off], data[3 + off]
+    lcfreq = _numint(kf, c4, STD8, block.long, 4)
+    if lcfreq:
+        ctx.error(f"*{block.name}: LCFREQ={lcfreq} output-frequency curves "
+                  "are not modelled (the manual does not document which "
+                  "curve column holds the frequencies) - use FMIN/FMAX/NFREQ "
+                  "or convert manually.")
+        return
+    if not edit:
+        lcdam = _numint(kf, c2, STD8, block.long, 1)
+        if lcdam:
+            lctyp = _numint(kf, c2, STD8, block.long, 2) or 0
+            xdim = {0: FREQ, 1: DIMLESS}.get(lctyp)
+            if xdim is None:
+                ctx.error(f"*{block.name}: LCTYP={lctyp} is not documented "
+                          "(R16 Vol I p.23-46).")
+            else:
+                ctx.register_curve(lcdam, xdim, DIMLESS,
+                                   block.name + " LCDAM")
+        return
+    kf.scale_field(data[0], STD8, block.long, 5, ctx.fac(FREQ))   # FNMAX
+    kf.scale_field(c2, STD8, block.long, 3, ctx.fac(FREQ))        # DMPMAS
+    kf.scale_field(c2, STD8, block.long, 4, ctx.fac(TIME))        # DMPSTF
+    for fi in (0, 1):                                             # FMIN FMAX
+        kf.scale_field(c4, STD8, block.long, fi, ctx.fac(FREQ))
+    if len(data) > 4 + off:
+        ctx.warn(f"*{block.name}: {len(data) - 4 - off} trailing card(s) "
+                 "beyond Card 4 left unscaled - verify manually.")
+    ctx.count(block.name)
+
+
+# *FREQUENCY_DOMAIN_RESPONSE_SPECTRUM Card 6a spectrum by LCTYP (R16 Vol I
+# p.23-85..23-86): 0-4 are plotted against natural FREQUENCY, 5-9 the same
+# five quantities against natural PERIOD, 10-12 are base motion TIME
+# histories.
+_RS_LCTYP: Dict[int, Tuple[Dim, Dim]] = {
+    0: (FREQ, VELOCITY), 1: (FREQ, ACCEL), 2: (FREQ, LENGTH),
+    3: (FREQ, FORCE), 4: (FREQ, PRESSURE),
+    5: (TIME, VELOCITY), 6: (TIME, ACCEL), 7: (TIME, LENGTH),
+    8: (TIME, FORCE), 9: (TIME, PRESSURE),
+    10: (TIME, VELOCITY), 11: (TIME, ACCEL), 12: (TIME, LENGTH),
+}
+
+
+def h_freq_response_spectrum(block: Block, ctx, edit: bool) -> None:
+    """*FREQUENCY_DOMAIN_RESPONSE_SPECTRUM (blank OPTION1), R16 Vol I
+    p.23-80..23-92.
+
+    Card 1 MDMIN MDMAX FNMIN FNMAX RESTRT MCOMB RELATV MPRS - FNMIN/FNMAX are
+    the natural frequencies admitted to the modal superposition.  Three flags
+    on that card insert optional cards BEFORE the damping card, which is why
+    a fixed table cannot find it: MCOMB=99 adds Cards 2.1 (MCOMB1 MCOMB2) and
+    2.2 (W1 W2), MPRS=2 adds Card 3 (R40), and the MISSING_MASS_CORRECTION
+    option adds Card 4 (ZPA + an A70 file name) whose first field is a
+    zero-period ACCELERATION.
+    Card 5 DAMPF LCDAMP LDTYP DMPMAS DMPSTF - the Rayleigh pair (alpha 1/time
+    at field 3, beta time at field 4).
+    Card 6a LCTYP DOF LC/TBID SF VID LNID LNTYP INFLAG repeats to the end of
+    the block, one per input spectrum; SF is a plain multiplier and LCTYP
+    picks the spectrum's axes.
+
+    The DDAM option is a separate keyword name and stays unknown: its
+    Card 6b carries a 6-way UNIT declaration and its STD=-1 coefficients are
+    defined against a modal weight in kips.
+    """
+    kf = ctx.kf
+    opts = block.name.split("_")
+    data = list(block.data)
+    if not data:
+        return
+    c1 = data[0]
+    mcomb = _numint(kf, c1, STD8, block.long, 5) or 0
+    mprs = _numint(kf, c1, STD8, block.long, 7) or 0
+    idx = 1
+    if mcomb == 99:
+        idx += 2                                   # Cards 2.1 and 2.2
+    if mprs == 2:
+        idx += 1                                   # Card 3 (R40)
+    zpa_card = None
+    if "MISSING" in opts and "MASS" in opts and "CORRECTION" in opts:
+        zpa_card = data[idx] if idx < len(data) else None
+        idx += 1                                   # Card 4 (ZPA + FILENAME)
+    if idx >= len(data):
+        ctx.error(f"*{block.name}: the flags on Card 1 (MCOMB={mcomb}, "
+                  f"MPRS={mprs}) imply the damping card at data line "
+                  f"{idx + 1}, but the block has only {len(data)}.")
+        return
+    c5 = data[idx]
+    spectra = data[idx + 1:]
+
+    if not edit:
+        lcdamp = _numint(kf, c5, STD8, block.long, 1)
+        if lcdamp:
+            ldtyp = _numint(kf, c5, STD8, block.long, 2) or 0
+            xdim = {0: FREQ, 1: DIMLESS}.get(ldtyp)
+            if xdim is None:
+                ctx.error(f"*{block.name}: LDTYP={ldtyp} is not documented "
+                          "(R16 Vol I p.23-84).")
+            else:
+                ctx.register_curve(lcdamp, xdim, DIMLESS,
+                                   block.name + " LCDAMP")
+        for li in spectra:
+            lctyp = _numint(kf, li, STD8, block.long, 0) or 0
+            axes = _RS_LCTYP.get(lctyp)
+            if axes is None:
+                ctx.error(f"*{block.name}: LCTYP={lctyp} is not documented "
+                          "(R16 Vol I p.23-85) - refusing to guess.")
+                return
+            lcid = _numint(kf, li, STD8, block.long, 2)
+            if lcid:
+                ctx.register_curve(lcid, axes[0], axes[1],
+                                   block.name + " input spectrum")
+                # LC/TBID may name a *DEFINE_TABLE whose value axis is a
+                # critical-damping ratio (dimensionless) and whose member
+                # curves are the spectra themselves.
+                ctx.register_table(lcid, DIMLESS, axes[0], axes[1])
+        return
+
+    for fi in (2, 3):                                       # FNMIN FNMAX
+        kf.scale_field(c1, STD8, block.long, fi, ctx.fac(FREQ))
+    if zpa_card is not None:
+        kf.scale_field(zpa_card, STD8, block.long, 0, ctx.fac(ACCEL))  # ZPA
+    kf.scale_field(c5, STD8, block.long, 3, ctx.fac(FREQ))   # DMPMAS (alpha)
+    kf.scale_field(c5, STD8, block.long, 4, ctx.fac(TIME))   # DMPSTF (beta)
+    ctx.count(block.name)
+
+
+# *FREQUENCY_DOMAIN_ACOUSTIC_BEM Card 4.1 curve ordinate by BEMTYP (R16
+# Vol I p.23-12..23-13); the abscissa is always a frequency.
+_BEM_TYPE_DIM: Dict[int, Dim] = {
+    0: DIMLESS, 1: DIMLESS,          # velocity from the transient run
+    2: PRESSURE,                     # real/imaginary pressure
+    3: VELOCITY,                     # real/imaginary normal velocity
+    4: ACOUST_IMP,                   # real/imaginary acoustic impedance
+    5: DIMLESS,                      # absorption coefficient
+}
+
+
+def h_freq_acoustic_bem(block: Block, ctx, edit: bool) -> None:
+    """*FREQUENCY_DOMAIN_ACOUSTIC_BEM{_ATV,_MATV,_POWER,_HALF_SPACE,
+    _PANEL_CONTRIBUTION}, R16 Vol I p.23-4..23-17.
+
+    Card 1 RO C FMIN FMAX NFREQ DTOUT TSTART PREF - fluid density, sound
+    speed, output frequency band, the binary-output time interval and start
+    time, and the reference pressure the dB scale is referred to.  C < 0
+    means |C| is a *FREQUENCY_DOMAIN_ACOUSTIC_SOUND_SPEED curve id and must
+    never be scaled.
+    Card 2 NSIDEXT TYPEXT NSIDINT TYPINT FFTWIN TRSLT IPFILE IUNITS - flags,
+    plus IUNITS, a unit-system DECLARATION that has to be rewritten together
+    with the values (see below).  FFTWIN = 5 or 8 inserts Card 2.1a
+    (T_HOLD DECAY, T_HOLD a hold-off TIME or, when negative, a per-panel
+    curve id); FFTWIN = 7 inserts Card 2.1b (ALPHA, the dimensionless Kaiser
+    shape parameter).  Both shift every later card.
+    Card 3 holds iteration counts and RELATIVE solver tolerances.
+    Card 4 <blank> NBC RESTRT IEDGE NOEL NFRUP VELOUT DBA - note the blank
+    first column: NBC, the number of Card 4.1 lines, sits at field 2.
+    Card 4.1 SSID SSTYPE NORM BEMTYP LC1 LC2 - ids and flags; BEMTYP picks
+    the LC1/LC2 curve ordinate and BEMTYP < 0 makes |BEMTYP| itself a
+    normal-velocity-amplitude curve id.
+    Card 5 (PANEL_CONTRIBUTION) is a node-set id and Card 6 (HALF_SPACE) a
+    *DEFINE_PLANE id plus the R17 reflection coefficient RC - both follow the
+    NBC Card 4.1 lines, Card 5 before Card 6.
+    """
+    kf = ctx.kf
+    opts = block.name.split("_")
+    data = list(block.data)
+    if len(data) < 4:
+        ctx.error(f"*{block.name}: expected at least Cards 1-4, found "
+                  f"{len(data)} data card(s).")
+        return
+    c1, c2 = data[0], data[1]
+    fftwin = _numint(kf, c2, STD8, block.long, 4) or 0
+    hold_card = None
+    idx = 2
+    if fftwin in (5, 8):
+        hold_card = data[idx] if idx < len(data) else None
+        idx += 1                                   # Card 2.1a T_HOLD DECAY
+    elif fftwin == 7:
+        idx += 1                                   # Card 2.1b ALPHA
+    idx += 1                                       # Card 3
+    if idx >= len(data):
+        ctx.error(f"*{block.name}: FFTWIN={fftwin} implies Card 4 at data "
+                  f"line {idx + 1}, but the block has only {len(data)}.")
+        return
+    c4 = data[idx]
+    if not _blank_field(kf, c4, STD8, block.long, 0):
+        ctx.error(f"*{block.name}: Card 4 must begin with a blank field "
+                  "(NBC sits in the second column, R16 Vol I p.23-10) but "
+                  f"data line {idx + 1} does not - the card layout was not "
+                  "understood, refusing to guess.")
+        return
+    nbc_raw = _numint(kf, c4, STD8, block.long, 1)
+    nbc = 1 if nbc_raw is None else max(nbc_raw, 0)          # default 1
+    bc_cards = data[idx + 1:idx + 1 + nbc]
+    expected = idx + 1 + nbc
+    if "PANEL_CONTRIBUTION" in block.name:
+        expected += 1
+    if "HALF_SPACE" in block.name:
+        expected += 1
+    if len(data) != expected:
+        ctx.error(f"*{block.name}: found {len(data)} data cards but the "
+                  f"flags imply {expected} (FFTWIN={fftwin}, NBC={nbc}) - "
+                  "the layout was not understood, refusing to guess.")
+        return
+    c = kf.get_number(c1, STD8, block.long, 1)
+
+    if not edit:
+        if c is not None and c < 0:
+            ctx.register_curve(int(-c), FREQ, VELOCITY,
+                               block.name + " complex sound speed")
+        if hold_card is not None:
+            th = kf.get_number(hold_card, STD8, block.long, 0)
+            if th is not None and th < 0:
+                ctx.register_curve(int(-th), DIMLESS, TIME,
+                                   block.name + " T_HOLD(panel)")
+        for li in bc_cards:
+            bemtyp = _numint(kf, li, STD8, block.long, 3) or 0
+            if bemtyp < 0:
+                ctx.register_curve(-bemtyp, FREQ, VELOCITY,
+                                   block.name + " |BEMTYP| velocity")
+                continue
+            ydim = _BEM_TYPE_DIM.get(bemtyp)
+            if ydim is None:
+                ctx.error(f"*{block.name}: BEMTYP={bemtyp} is not documented "
+                          "(R16 Vol I p.23-12) - refusing to guess.")
+                return
+            for fi in (4, 5):                                # LC1 LC2
+                lcid = _numint(kf, li, STD8, block.long, fi)
+                if lcid and ydim is not DIMLESS:
+                    ctx.register_curve(lcid, FREQ, ydim,
+                                       block.name + " LC1/LC2")
+        return
+
+    # ── edit pass ────────────────────────────────────────────────────────
+    kf.scale_field(c1, STD8, block.long, 0, ctx.fac(DENSITY))    # RO
+    if c is not None and c > 0:
+        kf.scale_field(c1, STD8, block.long, 1, ctx.fac(VELOCITY))
+    for fi in (2, 3):                                            # FMIN FMAX
+        kf.scale_field(c1, STD8, block.long, fi, ctx.fac(FREQ))
+    for fi in (5, 6):                                        # DTOUT TSTART
+        kf.scale_field(c1, STD8, block.long, fi, ctx.fac(TIME))
+    kf.scale_field(c1, STD8, block.long, 7, ctx.fac(PRESSURE))   # PREF
+    if hold_card is not None:
+        th = kf.get_number(hold_card, STD8, block.long, 0)
+        if th is None or th >= 0:
+            kf.scale_field(hold_card, STD8, block.long, 0, ctx.fac(TIME))
+    # IUNITS: 0 means "no unit change requested" and stays 0; any other value
+    # declares the deck's system and must be remapped to the destination's.
+    iunits = _numint(kf, c2, STD8, block.long, 7) or 0
+    if iunits:
+        src_sys = BEM_UNIT_SYSTEMS.get(iunits)
+        if src_sys is None:
+            ctx.error(f"*{block.name}: IUNITS={iunits} is not a documented "
+                      "value (0-4, R16 Vol I p.23-8) - refusing to guess "
+                      "what unit system the acoustic input declares.")
+            return
+        if ctx.src is not None and src_sys != ctx.src:
+            ctx.warn(f"*{block.name}: IUNITS={iunits} declares "
+                     f"{src_sys.key} but the deck is being converted as "
+                     f"{ctx.src.key} - the flag and the model units disagree "
+                     "in the SOURCE deck; the values are scaled as MODEL "
+                     "units and IUNITS is rewritten. Verify.")
+        new_units = BEM_UNITS.get((ctx.dst.mass, ctx.dst.length, ctx.dst.time))
+        if new_units is None:
+            supported = ", ".join(f"{v}={s.key}"
+                                  for v, s in sorted(BEM_UNIT_SYSTEMS.items()))
+            ctx.error(f"*{block.name}: IUNITS={iunits} declares the acoustic "
+                      "input's unit system, but the IUNITS table (R16 Vol I "
+                      f"p.23-8) has no value for {ctx.dst.key}. Supported "
+                      f"destinations: {supported}. Pick one of those, or set "
+                      "IUNITS=0 in the source deck and convert manually.")
+            return
+        w = 20 if block.long else 10
+        kf.set_field(c2, STD8, block.long, 7, str(new_units).rjust(w))
+        ctx.count(block.name + f" (IUNITS->{new_units})")
+        return
+    ctx.count(block.name)
+
+
+# *FREQUENCY_DOMAIN_ACOUSTIC_FEM Card 4 boundary excitation by VAD (R16
+# Vol I p.23-24).  The x1 spellings are amplitude + PHASE (the second curve
+# is an angle in degrees), the x2 spellings real + imaginary (both curves
+# carry the physical dimension).
+_FEM_VAD_DIM: Dict[int, Dim] = {
+    11: VELOCITY, 12: VELOCITY,
+    21: ACCEL, 22: ACCEL,
+    31: LENGTH, 32: LENGTH,
+    41: ACOUST_IMP, 42: ACOUST_IMP,
+    51: PRESSURE, 52: PRESSURE,
+}
+
+
+def h_freq_acoustic_fem(block: Block, ctx, edit: bool) -> None:
+    """*FREQUENCY_DOMAIN_ACOUSTIC_FEM{_EIGENVALUE,_MODAL}, R16 Vol I
+    p.23-20..23-27.
+
+    Card MDL (MODAL option only, and only when the fifth column is empty)
+    MDMIN MDMAX FNMIN FNMAX precedes Card 1 - fields 2 and 3 are natural
+    frequencies.
+    Card 1 RO C FMIN FMAX NFREQ DTOUT TSTART PREF, identical in meaning to
+    the BEM Card 1, including the C < 0 sound-speed-curve rule.
+    Card 2 <blank> FFTWIN MTXDMP RESTRT and Card 3 PID PTYP are flags and
+    ids.  Card 4 SID STYP VAD DOF LCID1 LCID2 SF VID repeats once per
+    boundary condition and Card 5 NID NTYP IPFILE DBA closes the block
+    (absent under EIGENVALUE).  The manual gives NO count field for the
+    Card 4 repeats, so they are located by counting backwards from the end
+    of the block - the last data card is Card 5.
+
+    Only Card 1 (and Card MDL) carry dimensional fields; SF on Card 4 is a
+    plain multiplier on the curves.  VAD selects the LCID1/LCID2 ordinate.
+    """
+    kf = ctx.kf
+    opts = block.name.split("_")
+    data = list(block.data)
+    if not data:
+        return
+    idx = 0
+    if ("MODAL" in opts
+            and _blank_field(kf, data[0], STD8, block.long, 4)):
+        if edit:                                        # Card MDL FNMIN FNMAX
+            for fi in (2, 3):
+                kf.scale_field(data[0], STD8, block.long, fi, ctx.fac(FREQ))
+        idx = 1
+    if len(data) <= idx:
+        ctx.error(f"*{block.name}: Card 1 not found.")
+        return
+    c1 = data[idx]
+    if len(data) > idx + 1 and not _blank_field(kf, data[idx + 1], STD8,
+                                                block.long, 0):
+        ctx.error(f"*{block.name}: Card 2 must begin with a blank field "
+                  "(FFTWIN sits in the second column, R16 Vol I p.23-22) but "
+                  f"data line {idx + 2} does not - the card layout was not "
+                  "understood, refusing to guess.")
+        return
+    rest = data[idx + 3:]                       # everything after Card 3
+    if "EIGENVALUE" in opts:
+        bc_cards = rest                         # Card 5 is absent
+    else:
+        bc_cards = rest[:-1]                    # the last card is Card 5
+    c = kf.get_number(c1, STD8, block.long, 1)
+
+    if not edit:
+        if c is not None and c < 0:
+            ctx.register_curve(int(-c), FREQ, VELOCITY,
+                               block.name + " complex sound speed")
+        for li in bc_cards:
+            vad = _numint(kf, li, STD8, block.long, 2) or 0
+            if vad in (0, 1, 2):                # SSD / transient / opening
+                continue
+            ydim = _FEM_VAD_DIM.get(vad)
+            if ydim is None:
+                ctx.error(f"*{block.name}: VAD={vad} is not documented "
+                          "(R16 Vol I p.23-24) - refusing to guess.")
+                return
+            lcid1 = _numint(kf, li, STD8, block.long, 4)
+            lcid2 = _numint(kf, li, STD8, block.long, 5)
+            if lcid1:
+                ctx.register_curve(lcid1, FREQ, ydim, block.name + " LCID1")
+            if lcid2:
+                # odd VAD -> LCID2 is a phase angle in degrees; even VAD ->
+                # it is the imaginary part and carries LCID1's dimension.
+                ctx.register_curve(lcid2, FREQ,
+                                   DIMLESS if vad % 2 else ydim,
+                                   block.name + " LCID2")
+        return
+
+    kf.scale_field(c1, STD8, block.long, 0, ctx.fac(DENSITY))    # RO
+    if c is not None and c > 0:
+        kf.scale_field(c1, STD8, block.long, 1, ctx.fac(VELOCITY))
+    for fi in (2, 3):                                            # FMIN FMAX
+        kf.scale_field(c1, STD8, block.long, fi, ctx.fac(FREQ))
+    for fi in (5, 6):                                        # DTOUT TSTART
+        kf.scale_field(c1, STD8, block.long, fi, ctx.fac(TIME))
+    kf.scale_field(c1, STD8, block.long, 7, ctx.fac(PRESSURE))   # PREF
+    ctx.count(block.name)
+
+
+def h_freq_incident_wave(block: Block, ctx, edit: bool) -> None:
+    """*FREQUENCY_DOMAIN_ACOUSTIC_INCIDENT_WAVE, R16 Vol I p.23-37..23-38.
+
+    Repeating cards TYPE MAG XC YC ZC, one per incident wave, running to the
+    next keyword.  TYPE flips the meaning of three fields on the same card:
+    "XC, YC, ZC: Direction cosines for the plane wave (TYPE = 1) or
+    coordinates of the point source for the spherical wave (TYPE = 2)".
+    MAG < 0 makes |MAG| a frequency-dependent magnitude curve id.
+
+    For TYPE = 1 the magnitude is the plane-wave pressure amplitude A of
+    p = A*exp(-ik(ax+by+cz)) - a PRESSURE.  For TYPE = 2 Remark 2 gives
+    p(r) = A*exp(-ikr)/r, which makes A a pressure TIMES a length, but the
+    manual never states the units of MAG for that branch.  Rather than pick
+    between two defensible readings on a field nobody could confirm, the
+    spherical branch is refused.
+    """
+    kf = ctx.kf
+    for li in block.data:
+        wtype = _numint(kf, li, STD8, block.long, 0)
+        wtype = 1 if wtype is None else wtype
+        mag = kf.get_number(li, STD8, block.long, 1)
+        if wtype not in (1, 2):
+            ctx.error(f"*{block.name}: TYPE={wtype} is not documented "
+                      "(1 = plane wave, 2 = spherical wave, R16 Vol I "
+                      "p.23-37) - refusing to guess.")
+            return
+        if wtype == 2 and mag is not None and mag > 0:
+            ctx.error(f"*{block.name}: TYPE=2 (spherical wave) with "
+                      f"MAG={mag}. Remark 2 (R16 Vol I p.23-38) defines "
+                      "p(r) = A*exp(-ikr)/r, which makes MAG a pressure "
+                      "TIMES a length, but the manual never states its "
+                      "units - kunit refuses to pick between "
+                      "pressure*length and plain pressure. Convert this "
+                      "incident wave manually (the XC/YC/ZC point-source "
+                      "coordinates are lengths).")
+            return
+        if mag is not None and mag < 0:
+            if not edit:
+                ctx.register_curve(int(-mag), FREQ, PRESSURE,
+                                   block.name + " magnitude(frequency)")
+        elif edit and wtype == 1:
+            kf.scale_field(li, STD8, block.long, 1, ctx.fac(PRESSURE))
+        if edit and wtype == 2:
+            for fi in (2, 3, 4):                          # XC YC ZC
+                kf.scale_field(li, STD8, block.long, fi, ctx.fac(LENGTH))
+    if edit:
+        ctx.count(block.name)
+
+
+def h_database_frequency_ascii(block: Block, ctx, edit: bool) -> None:
+    """*DATABASE_FREQUENCY_ASCII_{OPTION1}_{OPTION2}, R16 Vol I
+    p.16-91..16-93.
+
+    One card - FMIN FMAX NFREQ FSPACE LCFREQ - shared by every OPTION1
+    (NODOUT_SSD, ELOUT_SSD, NODFOR_SSD, SECFORC_SSD, NODOUT_PSD, ELOUT_PSD);
+    OPTION1 only selects which binout database the frequencies apply to.
+    FMIN/FMAX are documented verbatim as "(cycles/time)".  Under the SUBCASE
+    option the card repeats once per *FREQUENCY_DOMAIN_SSD_SUBCASE loading
+    case (Remark 8), so every data line is scaled.
+
+    LCFREQ names a curve listing the output frequencies, but the manual never
+    says which curve column holds them - refused here exactly as
+    h_database_frequency refuses it for the binary card.
+    """
+    kf = ctx.kf
+    for li in block.data:
+        lcfreq = _numint(kf, li, STD8, block.long, 4)
+        if lcfreq:
+            ctx.error(f"*{block.name}: LCFREQ={lcfreq} output-frequency "
+                      "curves are not modelled (the manual does not document "
+                      "which curve column holds the frequencies, R16 Vol I "
+                      "p.16-93) - use FMIN/FMAX/NFREQ or convert manually.")
+            continue
+        if edit:
+            for fi in (0, 1):                                # FMIN FMAX
+                kf.scale_field(li, STD8, block.long, fi, ctx.fac(FREQ))
+    if edit:
+        ctx.count(block.name)
+
+
 def h_database_frequency(block: Block, ctx, edit: bool) -> None:
     """R16 Vol I p.16-94..16-100 (*DATABASE_FREQUENCY_BINARY_OPTION1_
     {OPTION2}).  Card 1a BINARY SF - - PSETID holds flags plus the
@@ -1782,6 +3801,15 @@ def x_scan_part(block: Block, ctx) -> None:
 CUSTOM: Dict[str, Callable] = {
     "DEFINE_CURVE": h_define_curve,
     "DEFINE_TABLE": h_define_table,
+    "DEFINE_BOX": h_define_box,
+    "DEFINE_VECTOR": h_define_vector,
+    "ALE_STRUCTURED_FSI": h_ale_structured_fsi,
+    "ALE_STRUCTURED_FSI_ABEXT": h_ale_structured_fsi,
+    "ALE_STRUCTURED_FSI_ABINT": h_ale_structured_fsi,
+    "ALE_STRUCTURED_MESH_CONTROL_POINTS": h_ale_control_points,
+    "ALE_STRUCTURED_MESH_VOLUME_FILLING": h_ale_volume_filling,
+    "BOUNDARY_SALE_MESH_FACE": h_boundary_sale_mesh_face,
+    "INITIAL_VOLUME_FRACTION_GEOMETRY": h_initial_volume_fraction_geometry,
     "ELEMENT_SPH": h_element_sph,
     "ELEMENT_SPH_VOLUME": h_element_sph,
     "LOAD_BLAST_ENHANCED": h_blast,
@@ -1792,6 +3820,24 @@ CUSTOM: Dict[str, Callable] = {
     "MAT_ADD_FATIGUE_EN": h_mat_add_fatigue,
     "FREQUENCY_DOMAIN_RANDOM_VIBRATION": h_freq_random_vibration,
     "FREQUENCY_DOMAIN_RANDOM_VIBRATION_FATIGUE": h_freq_random_vibration,
+    # The SSD options that add no card of their own (DIRECT, FRF) share the
+    # base layout; ERP and FATIGUE are handled inside the handler.  SUBCASE
+    # interleaves character-data cards and stays unknown.
+    "FREQUENCY_DOMAIN_SSD": h_freq_ssd,
+    "FREQUENCY_DOMAIN_SSD_ERP": h_freq_ssd,
+    "FREQUENCY_DOMAIN_SSD_FATIGUE": h_freq_ssd,
+    "FREQUENCY_DOMAIN_SSD_FRF": h_freq_ssd,
+    "FREQUENCY_DOMAIN_SSD_DIRECT": h_freq_ssd,
+    "FREQUENCY_DOMAIN_SSD_DIRECT_FREQUENCY_DEPENDENT": h_freq_ssd,
+    "FREQUENCY_DOMAIN_FRF": h_freq_frf,
+    "FREQUENCY_DOMAIN_RESPONSE_SPECTRUM": h_freq_response_spectrum,
+    "FREQUENCY_DOMAIN_RESPONSE_SPECTRUM_MISSING_MASS_CORRECTION":
+        h_freq_response_spectrum,
+    "FREQUENCY_DOMAIN_ACOUSTIC_INCIDENT_WAVE": h_freq_incident_wave,
+    "AIRBAG_SIMPLE_AIRBAG_MODEL": h_airbag_simple,
+    "AIRBAG_SIMPLE_PRESSURE_VOLUME": h_airbag_simple,
+    "LOAD_THERMAL_LOAD_CURVE": h_load_thermal_load_curve,
+    "LOAD_THERMAL_VARIABLE": h_load_thermal_variable,
     "LOAD_NODE_POINT": h_load_node_or_rb,
     "LOAD_NODE_SET": h_load_node_or_rb,
     "LOAD_RIGID_BODY": h_load_node_or_rb,
@@ -1806,12 +3852,21 @@ CUSTOM: Dict[str, Callable] = {
     "MAT_DAMPER_NONLINEAR_VISCOUS": h_smat_curve_mats,
     "MAT_CSCM": h_mat_cscm,
     "MAT_CSCM_CONCRETE": h_mat_cscm,
+    "MAT_FRAZER_NASH_RUBBER_MODEL": h_mat_frazer_nash,
+    "MAT_INV_HYPERBOLIC_SIN": h_mat_inv_hyperbolic_sin,
+    "MAT_SPOTWELD": h_mat_spotweld,
+    "MAT_THERMAL_ISOTROPIC": h_mat_thermal_isotropic,
     "ICFD_BOUNDARY_PRESCRIBED_VEL": h_icfd_prescribed_vel,
     "ICFD_BOUNDARY_PRESCRIBED_PRE": h_icfd_prescribed_pre,
+    "ICFD_BOUNDARY_PRESCRIBED_TEMP": h_icfd_prescribed_temp,
     "ICFD_CONTROL_TIME": h_icfd_control_time,
+    "ICFD_INITIAL": h_icfd_initial,
     "MESH_BL": h_mesh_bl,
     "CONSTRAINED_LAGRANGE_IN_SOLID": h_lagrange_in_solid,
     "CONSTRAINED_NODAL_RIGID_BODY_INERTIA": h_cnrb_inertia,
+    "CONSTRAINED_JOINT_STIFFNESS_GENERALIZED": h_joint_stiffness_generalized,
+    "CONSTRAINED_SHELL_IN_SOLID": h_shell_in_solid,
+    "CONSTRAINED_SHELL_IN_SOLID_PENALTY": h_shell_in_solid,
     "INITIAL_STRESS_SHELL": h_initial_stress_shell,
     "INITIAL_STRESS_SHELL_SET": h_initial_stress_shell,
     "INITIAL_STRESS_SOLID": h_initial_stress_solid,
@@ -1852,13 +3907,17 @@ def _rule_rigidwall_planar(name):
 
 def _rule_contact(name):
     # families whose card 2/3 layouts differ from the 3D penalty
-    # layout h_contact models must not be routed there
+    # layout h_contact models must not be routed there.
     # MORTAR contacts use the same 3D penalty-card layout h_contact
     # models (Cards 1-3 SSID/MSID.., FS FD DC VC.., SFS SFM SST MST..),
     # only adding optional MPP/advanced cards that h_contact tolerates -
-    # so they are NOT excluded here (R16 Vol I *CONTACT_..._MORTAR).
+    # so they are NOT excluded here (R16 Vol I *CONTACT_..._MORTAR); the
+    # MPP spellings only PREPEND their own dimensionless cards, which
+    # h_contact's MPP plan handles.  The THERMAL option however inserts a
+    # THRM card between the mandatory and optional cards (card-order
+    # table, R16 Vol I p.11-6..11-7) and is not modelled - keep unknown.
     if (name.startswith("CONTACT_TIEBREAK") or "DRAWBEAD" in name
-            or "MPP" in name or "DAMPING" in name
+            or "DAMPING" in name or "THERMAL" in name
             or name.startswith("CONTACT_2D") or "ENTITY" in name
             or "GEBOD" in name or "INTERIOR" in name
             or "GUIDED_CABLE" in name or "COUPLING" in name
@@ -1871,8 +3930,24 @@ def _rule_database_frequency_binary(name):
     return "custom", h_database_frequency
 
 
+def _rule_database_frequency_ascii(name):
+    return "custom", h_database_frequency_ascii
+
+
 def _rule_database_frequency(name):
-    return "unknown", None      # ASCII variants: layout not modelled
+    return "unknown", None      # other variants: layout not modelled
+
+
+def _rule_rigidwall_geometric(name):
+    return "custom", h_rigidwall_geometric
+
+
+def _rule_freq_acoustic_bem(name):
+    return "custom", h_freq_acoustic_bem
+
+
+def _rule_freq_acoustic_fem(name):
+    return "custom", h_freq_acoustic_fem
 
 
 def _rule_database_binary(name):
@@ -1905,9 +3980,13 @@ _ROUTER_RULES: List[Tuple[str, Callable[[str], Tuple[str, object]]]] = [
     ("LOAD_BODY_", _rule_load_body),
     ("BOUNDARY_PRESCRIBED_MOTION", _rule_prescribed_motion),
     ("RIGIDWALL_PLANAR", _rule_rigidwall_planar),
+    ("RIGIDWALL_GEOMETRIC", _rule_rigidwall_geometric),
     ("CONTACT_", _rule_contact),
+    ("FREQUENCY_DOMAIN_ACOUSTIC_BEM", _rule_freq_acoustic_bem),
+    ("FREQUENCY_DOMAIN_ACOUSTIC_FEM", _rule_freq_acoustic_fem),
     # DATABASE_ family: most-specific prefix first (see order note above)
     ("DATABASE_FREQUENCY_BINARY", _rule_database_frequency_binary),
+    ("DATABASE_FREQUENCY_ASCII", _rule_database_frequency_ascii),
     ("DATABASE_FREQUENCY_", _rule_database_frequency),
     ("DATABASE_BINARY_", _rule_database_binary),
     ("DATABASE_", _rule_database),
@@ -1947,17 +4026,18 @@ def resolve(name: str):
 SCAN_EXTRA: Dict[str, Callable] = {
     "MAT_PIECEWISE_LINEAR_PLASTICITY": h_mat_024,
     "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY": h_mat_024,
+    "MAT_LOW_DENSITY_FOAM": h_mat_057,
     "PART": x_scan_part,
     "PART_INERTIA": x_scan_part,
     "PART_CONTACT": x_scan_part,
 }
 # edit-time extras (warnings that need field values)
 EDIT_EXTRA: Dict[str, Callable] = {
+    "ALE_REFERENCE_SYSTEM_GROUP": x_ale_ref_group,
     "MAT_ELASTIC": x_mat_001,
     "MAT_ELASTIC_FLUID": x_mat_001,
     "MAT_JOHNSON_COOK": x_mat_015,
     "MAT_POWER_LAW_PLASTICITY": x_mat_018,
-    "MAT_SPOTWELD": x_mat_100,
     "PART_INERTIA": x_part_inertia,
 }
 

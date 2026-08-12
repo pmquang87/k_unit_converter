@@ -42,6 +42,12 @@ class ScanResult:
         self.table_nvalues: Dict[int, int] = {}
         self.part_links: List[Tuple[int, int, int]] = []
         self.sec_discrete_dro: Dict[int, int] = {}
+        # S-ALE context guards, filled during the scan pass: *DEFINE_VECTOR
+        # ids whose XT/YT/ZT are initial VELOCITIES rather than coordinates,
+        # and *DEFINE_BOX ids whose six values are control-point INDICES
+        # rather than coordinates (see h_ale_volume_filling).
+        self.sale_vel_vectors: Set[int] = set()
+        self.sale_index_boxes: Set[int] = set()
         self.torsional_mats: Set[int] = set()
         self.smat_blocks: List[Tuple[KFile, Block, str]] = []
         self.probes: Dict[str, list] = {"ro": [], "e": [], "d": [],
