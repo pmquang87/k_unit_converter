@@ -84,3 +84,46 @@ class HeaderTokenOrderTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+_MAT_ELASTIC_DECK = """{header}*KEYWORD
+*MAT_ELASTIC
+         1{ro:>10}{e:>10}       0.3
+*NODE
+       1             1.7        1.654231       0.2799996       0       0
+*END
+"""
+
+
+class CgsPresetTests(unittest.TestCase):
+    """g-cm-s (classic CGS: dyne, barye) preset + the density-plausibility
+    penalty that made adding it safe (audited over the 356-deck dynaexamples
+    corpus: only the two genuine CGS decks changed verdict)."""
+
+    def test_cgs_deck_detects_g_cm_s(self):
+        # J.Day component decks: RO 7.8 g/cm3 (steel), E 2.0e12 Ba = 200 GPa.
+        p = _write(_MAT_ELASTIC_DECK.format(header="", ro="7.8", e="2.0E12"))
+        v = detect(p)
+        self.assertEqual(v.system, parse_system("g-cm-s"))
+        self.assertFalse(v.ambiguous, v.table())
+
+    def test_si_concrete_not_stolen_by_cgs(self):
+        # Concrete tower in SI (RO 2500 kg/m3, E 3e10 Pa): under g-cm-s the
+        # density is an absurd 2.5e6 kg/m3 while E = 3e9 Pa picks up band
+        # credit - without the implausible-density penalty this outranked
+        # the truth when the preset was added.
+        p = _write(_MAT_ELASTIC_DECK.format(header="", ro="2500.0",
+                                            e="3.0E10"))
+        v = detect(p)
+        self.assertEqual(v.system, parse_system("kg-m-s"))
+        self.assertFalse(v.ambiguous, v.table())
+
+    def test_header_declared_system_exempt_from_penalty(self):
+        # NVH acoustic decks routinely carry air density in kg/m3 inside a
+        # declared ton-mm-s deck; the declaration must not lose its margin
+        # to the penalty for that one sloppy card.
+        p = _write(_MAT_ELASTIC_DECK.format(
+            header="$ Unit system : ton, mm, s\n", ro="1.22", e="0.0"))
+        v = detect(p)
+        self.assertEqual(v.system, parse_system("ton-mm-s"))
+        self.assertFalse(v.ambiguous, v.table())

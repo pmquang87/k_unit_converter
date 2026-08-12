@@ -213,6 +213,12 @@ PRESETS: Dict[str, UnitSystem] = {
         UnitSystem("g", "mm", "ms"),
         UnitSystem("g", "cm", "us"),
         UnitSystem("g", "cm", "ms"),
+        # classic CGS (dyne, erg, barye = 0.1 Pa): used by legacy J.Day
+        # dynaexamples decks (component1/2: RO 7.8 g/cm3, E 2.0e12 Ba
+        # = 200 GPa).  Added 2026-08-12 with a corpus-wide detection
+        # regression audit over the 356 dynaexamples decks (no verdict
+        # of another system flipped; see the schema-extension session).
+        UnitSystem("g", "cm", "s"),
         UnitSystem("kg", "cm", "ms"),
         UnitSystem("kg", "cm", "s"),
         UnitSystem("kg", "mm", "s"),

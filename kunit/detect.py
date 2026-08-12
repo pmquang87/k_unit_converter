@@ -212,6 +212,19 @@ def detect(path: str, follow_includes: bool = True,
                 s += 2
             elif _log_band(d_si, 50, 700) or _log_band(d_si, 25000, 1e5):
                 s += 0.3
+            elif (d_si > 3e5 or d_si < 1e-3) and sys != header_sys:
+                # Physically impossible under this candidate system: the
+                # heaviest real material is ~2.26e4 kg/m3 (heavy mass-scaled
+                # forming decks reach ~1e5), the lightest gas ~1e-2.  Without
+                # this penalty a lucky modulus-anchor hit can carry a system
+                # that renders every density absurd - adding the g-cm-s
+                # preset flipped four confident SI decks (concrete tower
+                # rho=2500, E=3e10: in CGS 2.5e6 kg/m3 but E=3e9 Pa near an
+                # anchor) before this guard existed.  The header-declared
+                # system is exempt: an explicit unit statement outranks a
+                # single sloppy material card (NVH acoustic decks routinely
+                # carry air density in kg/m3 regardless of deck units).
+                s -= 3
         for e in es:
             e_si = e * fm / (fl * ft ** 2)
             if _near(e_si, _MODULUS_ANCHORS, 0.05):
