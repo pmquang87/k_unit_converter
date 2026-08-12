@@ -223,14 +223,14 @@ class ConvertTests(unittest.TestCase):
             self.assertAlmostEqual(float(na[sl]), float(nb[sl]), places=6)
 
     def test_unknown_keyword_refused(self):
-        deck = DECK_SI.replace("*END", "*AIRBAG_SIMPLE_PRESSURE_VOLUME\n"
+        deck = DECK_SI.replace("*END", "*MAT_FABRIC\n"
                                "         1\n*END")
         p = _write(deck)
         with self.assertRaises(ConvertError):
             convert(p, SI, TON, p + ".o.k", self_check=False)
         ctx = convert(p, SI, TON, p + ".o.k", allow_unknown=True,
                       self_check=False)
-        self.assertIn("AIRBAG_SIMPLE_PRESSURE_VOLUME", ctx.unknown)
+        self.assertIn("MAT_FABRIC", ctx.unknown)
 
     def test_parameter_field_refused(self):
         deck = DECK_SI.replace(
