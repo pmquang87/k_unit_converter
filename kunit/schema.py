@@ -26,7 +26,8 @@ if TYPE_CHECKING:
     from .convert import Ctx
 from .units import (ACCEL, ACCEL_PSD, ACOUST_IMP, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC,
                     DENSITY, Dim, DIM_NAMES, DIMLESS, DISP_PSD, FORCE,
-                    FORCE_PSD, FREQ, INERTIA, INV_PRESSURE, L4, LENGTH,
+                    FORCE_PSD, FREQ, HEAT_FLUX, INERTIA, INV_PRESSURE, L4,
+                    LENGTH,
                     MASS, MASS_AREA, MASS_LEN, MOMENT, POWER, PRES_PSD,
                     PRESSURE, PWR_VOL, RATE,
                     ROT_DAMP, SPEC_HEAT, STIFF, STIFF_LEN, STRESS_M3, TEMP,
@@ -502,6 +503,18 @@ SPECS: Dict[str, Spec] = {
     "CONTROL_TIMESTEP": Spec(cards=[C({0: TIME, 3: TIME, 4: TIME})],
                              curves=[(0, 5, TIME, TIME)], extra_ok=True),
     "CONTROL_DYNAMIC_RELAXATION": Spec(cards=[C({3: TIME})]),
+    # R16 Vol I p.12-568..12-571 (*CONTROL_THERMAL_SOLVER) Card 1
+    # ATYPE PTYPE SOLVER - GPT EQHEAT FWORK SBC.  SBC is the "Stefan
+    # Boltzmann constant.  Value is used with enclosure radiation surfaces",
+    # the same HEAT_FLUX signature as *BOUNDARY_RADIATION's f - and it MUST
+    # be rescaled with it, or a converted radiation deck ends up carrying
+    # sigma in two different unit systems at once.  EQHEAT (mechanical
+    # equivalent of heat) and FWORK (fraction of work turned into heat) are
+    # ratios inside one consistent unit system, and EQHEAT < 0 is a curve id
+    # - unscaled either way.  Cards 2a/2b (solver tolerances, branching on
+    # SOLVER) and Card 3 are deliberately NOT modelled: they trip the
+    # "trailing card(s) beyond the modelled layout" warning instead.
+    "CONTROL_THERMAL_SOLVER": Spec(cards=[C({7: HEAT_FLUX})]),
     # R16 Vol I p.12-530..12-535 (*CONTROL_SPH): Card1 NCBS BOXID DT IDIM
     # NMNEIGH FORM START MAXV - DT is the SPH death time, START the particle-
     # approximation start time, MAXV the deactivation velocity threshold
@@ -1323,6 +1336,150 @@ def h_airbag_simple(block: Block, ctx, edit: bool) -> None:
             kf.scale_field(data[idx + 1], STD8, block.long, 4,
                            ctx.fac(MASS))                      # MW
     ctx.count(block.name)
+
+
+def h_boundary_temperature(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.5-146..5-147 (*BOUNDARY_TEMPERATURE_{NODE|SET}).
+
+    The NODE and SET spellings share one card table: NID TLCID TMULT LOC
+    TDEATH TBIRTH, one card per node / node set (the manual prints a single
+    "Card 1", but decks stack several - 0168__ex_22 has two).  Only TDEATH
+    and TBIRTH are dimensional.
+
+    TMULT is never rescaled whichever branch applies: with TLCID = 0 "T is a
+    constant defined by the value TMULT", a temperature; with TLCID > 0 it
+    multiplies a (time, temperature) curve and is a plain factor.
+    """
+    kf = ctx.kf
+    for li in block.data:
+        lcid = _numint(kf, li, STD8, block.long, 1)
+        if not edit:
+            if lcid:
+                ctx.register_curve(lcid, TIME, TEMP,
+                                   block.name + " temperature(time)")
+        else:
+            kf.scale_field(li, STD8, block.long, 4, ctx.fac(TIME))  # TDEATH
+            kf.scale_field(li, STD8, block.long, 5, ctx.fac(TIME))  # TBIRTH
+            if not lcid and kf.get_number(li, STD8, block.long, 2):
+                ctx.note(f"*{block.name}: temperature field left unchanged "
+                         "(temperatures are never rescaled)")
+    if edit:
+        ctx.count(block.name)
+
+
+def _thermal_coef_pair(block: Block, ctx, edit: bool, li: int, what: str,
+                       page: str) -> None:
+    """Shared Card 2 of *BOUNDARY_CONVECTION_SET / *BOUNDARY_RADIATION_SET.
+
+    Layout XLCID XMULT TLCID TMULT LOC, where X is the convection coefficient
+    h or the radiation coefficient f = sigma*eps*F.  Both are HEAT_FLUX under
+    kunit's same-temperature-unit assumption.  Three branches, and the SIGN
+    of XLCID moves the curve's abscissa between time and temperature:
+
+      XLCID = 0   XMULT *is* the coefficient          -> scale XMULT
+      XLCID > 0   curve (time, coefficient)           -> XMULT is a factor
+      XLCID < 0   curve (temperature, coefficient)    -> XMULT is a factor
+
+    TLCID is the same shape for the environment temperature T_inf, except
+    that no negative branch is documented and the ordinate is a TEMP, so
+    TMULT never scales either way.
+
+    A positive XLCID may name a *DEFINE_FUNCTION instead of a *DEFINE_CURVE
+    (Remark 2) and the two ids live in different tables.  That cannot corrupt
+    a deck here because *DEFINE_FUNCTION is a hard flag: any deck carrying
+    one is refused before this code registers anything.
+    """
+    kf = ctx.kf
+    xlcid = _numint(kf, li, STD8, block.long, 0) or 0
+    tlcid = _numint(kf, li, STD8, block.long, 2) or 0
+    if not edit:
+        if xlcid > 0:
+            ctx.register_curve(xlcid, TIME, HEAT_FLUX,
+                               f"{block.name} {what}(time)")
+        elif xlcid < 0:
+            ctx.register_curve(-xlcid, TEMP, HEAT_FLUX,
+                               f"{block.name} {what}(temperature)")
+        if tlcid > 0:
+            ctx.register_curve(tlcid, TIME, TEMP,
+                               block.name + " temperature(time)")
+        return
+    if xlcid == 0:
+        kf.scale_field(li, STD8, block.long, 1, ctx.fac(HEAT_FLUX))
+    if not tlcid and kf.get_number(li, STD8, block.long, 3):
+        ctx.note(f"*{block.name}: temperature field left unchanged "
+                 "(temperatures are never rescaled)")
+
+
+def _thermal_pairs(block: Block, ctx, edit: bool, what: str, page: str):
+    """Walk the repeating 2-card sets of the CONVECTION / RADIATION keywords.
+
+    "Include the following 2 cards for each set" - 0169__ex_23 really does
+    stack two pairs under one *BOUNDARY_CONVECTION_SET header, so an odd card
+    count means the layout was misread and the deck must be refused rather
+    than half-scaled.
+    """
+    data = list(block.data)
+    if len(data) % 2:
+        ctx.error(f"*{block.name}: {len(data)} data cards is not a multiple "
+                  f"of the 2-card set ({page}) - the layout was not "
+                  "understood, refusing to guess.")
+        return
+    for i in range(1, len(data), 2):
+        _thermal_coef_pair(block, ctx, edit, data[i], what, page)
+    if edit:
+        ctx.count(block.name)
+
+
+def h_boundary_convection(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.5-30..5-32 (*BOUNDARY_CONVECTION_SET).
+
+    Card 1 is SSID PSEROD (segment-set id + erosion part-set id, no
+    dimensional field); Card 2 carries the convection coefficient h - see
+    _thermal_coef_pair.  The SEGMENT spelling puts four node ids on Card 1
+    instead and is NOT routed here: the exact key keeps them apart.
+    """
+    _thermal_pairs(block, ctx, edit, "h", "R16 Vol I p.5-30")
+
+
+def h_boundary_radiation(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.5-120..5-122 (*BOUNDARY_RADIATION_SET).
+
+    Card 1 is SSID TYPE - - - - PSEROD (note the four blank columns: PSEROD
+    sits in field 7 here but in field 2 of *BOUNDARY_CONVECTION_SET); Card 2
+    carries f = sigma*eps*F - see _thermal_coef_pair.
+
+    Remark 1 (p.5-114) requires an ABSOLUTE temperature scale for radiation
+    ("zero degrees must correspond to absolute zero"), which is one more
+    reason the T_inf column is left alone: T^4 tolerates no offset shift.
+    """
+    _thermal_pairs(block, ctx, edit, "f=sigma*eps*F", "R16 Vol I p.5-120")
+
+
+def h_load_thermal_variable_node(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.33-174 (*LOAD_THERMAL_VARIABLE_NODE): repeating NID TS TB
+    LCID, "one card per node", no header card.
+
+    Remark 1 gives T = TB + TS * f(t), so TS and TB are temperatures (never
+    rescaled) and the curve is a pure multiplier against TIME - registering
+    its ordinate as DIMLESS is what stops a shared curve from being scaled by
+    somebody else's factor.  Nothing on the card itself is dimensional.
+
+    Deliberately an exact key: *LOAD_THERMAL_VARIABLE (p.33-168) is a 2-card
+    set, and _SHELL / _BEAM (p.33-175, p.33-170) add normalised through-
+    thickness coordinates - none of them share this layout.
+    """
+    kf = ctx.kf
+    for li in block.data:
+        if not edit:
+            lcid = _numint(kf, li, STD8, block.long, 3)
+            if lcid:
+                ctx.register_curve(lcid, TIME, DIMLESS,
+                                   block.name + " multiplier(time)")
+        elif any(kf.get_number(li, STD8, block.long, fi) for fi in (1, 2)):
+            ctx.note(f"*{block.name}: temperature field left unchanged "
+                     "(temperatures are never rescaled)")
+    if edit:
+        ctx.count(block.name)
 
 
 def h_load_thermal_load_curve(block: Block, ctx, edit: bool) -> None:
@@ -3838,6 +3995,11 @@ CUSTOM: Dict[str, Callable] = {
     "AIRBAG_SIMPLE_PRESSURE_VOLUME": h_airbag_simple,
     "LOAD_THERMAL_LOAD_CURVE": h_load_thermal_load_curve,
     "LOAD_THERMAL_VARIABLE": h_load_thermal_variable,
+    "LOAD_THERMAL_VARIABLE_NODE": h_load_thermal_variable_node,
+    "BOUNDARY_TEMPERATURE_NODE": h_boundary_temperature,
+    "BOUNDARY_TEMPERATURE_SET": h_boundary_temperature,
+    "BOUNDARY_CONVECTION_SET": h_boundary_convection,
+    "BOUNDARY_RADIATION_SET": h_boundary_radiation,
     "LOAD_NODE_POINT": h_load_node_or_rb,
     "LOAD_NODE_SET": h_load_node_or_rb,
     "LOAD_RIGID_BODY": h_load_node_or_rb,

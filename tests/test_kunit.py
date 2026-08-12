@@ -1562,3 +1562,103 @@ class RandomFatigueTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThermalBoundaryTests(unittest.TestCase):
+    """Thermal boundary / load keywords (R16 Vol I p.5-30, p.5-120, p.5-146,
+    p.12-568, p.33-174).  kg-m-s -> kg-mm-ms so that both the TIME factor
+    (x1000) and the HEAT_FLUX factor (x1e-9) are non-trivial."""
+
+    def _conv(self, deck, **kw):
+        p = _write(deck)
+        out = p + ".o.k"
+        ctx = convert(p, SI, KGMM, out, self_check=False, **kw)
+        return _lines(out), ctx
+
+    def test_boundary_temperature_set(self):
+        deck = ("*KEYWORD\n*BOUNDARY_TEMPERATURE_SET\n"
+                + F(1, 0, 1000.0, 0, "1.00000E20", 0.0) + "\n"
+                + F(2, 7, 1.0, 0, 5.0, 0.5) + "\n"
+                "*DEFINE_CURVE\n" + F(7, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("0.0", w=20) + F("300.0", w=20) + "\n"
+                + F("2.0", w=20) + F("400.0", w=20) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*BOUNDARY_TEMPERATURE_SET")
+        self.assertAlmostEqual(float(lines[i + 1][20:30]), 1000.0)   # TMULT
+        self.assertAlmostEqual(float(lines[i + 1][40:50]), 1e23)     # TDEATH
+        self.assertAlmostEqual(float(lines[i + 2][40:50]), 5000.0)   # TDEATH
+        self.assertAlmostEqual(float(lines[i + 2][50:60]), 500.0)    # TBIRTH
+        j = lines.index("*DEFINE_CURVE")
+        # curve is (time, temperature): abscissa scales, ordinate never does
+        self.assertAlmostEqual(float(lines[j + 3][0:20]), 2000.0)
+        self.assertAlmostEqual(float(lines[j + 3][20:40]), 400.0)
+
+    def test_boundary_convection_set_constant_h(self):
+        # two 2-card sets under one keyword, as 0169__ex_23 writes them
+        deck = ("*KEYWORD\n*BOUNDARY_CONVECTION_SET\n"
+                + F(1, 0) + "\n" + F(0, 750.0, 0, 20.0, 0) + "\n"
+                + F(2, 0) + "\n" + F(0, 750.0, 0, 20.0, 0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*BOUNDARY_CONVECTION_SET")
+        for k in (2, 4):
+            self.assertAlmostEqual(float(lines[i + k][10:20]), 750e-9)  # HMULT
+            self.assertAlmostEqual(float(lines[i + k][30:40]), 20.0)    # TMULT
+        self.assertEqual(int(lines[i + 3][0:10]), 2)                    # SSID
+
+    def test_boundary_convection_h_of_temperature(self):
+        # HLCID < 0: the curve abscissa is a TEMPERATURE, not a time, and
+        # HMULT is then a plain multiplier
+        deck = ("*KEYWORD\n*BOUNDARY_CONVECTION_SET\n"
+                + F(1, 0) + "\n" + F(-101, 1.0, 0, 20.0, 0) + "\n"
+                "*DEFINE_CURVE\n" + F(101, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("300.0", w=20) + F("10.0", w=20) + "\n"
+                + F("600.0", w=20) + F("14.0", w=20) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*BOUNDARY_CONVECTION_SET")
+        self.assertAlmostEqual(float(lines[i + 2][10:20]), 1.0)      # HMULT
+        j = lines.index("*DEFINE_CURVE")
+        self.assertAlmostEqual(float(lines[j + 3][0:20]), 600.0)     # T stays
+        self.assertAlmostEqual(float(lines[j + 3][20:40]), 14e-9)    # h scales
+
+    def test_boundary_convection_odd_card_count_refused(self):
+        deck = ("*KEYWORD\n*BOUNDARY_CONVECTION_SET\n"
+                + F(1, 0) + "\n" + F(0, 750.0, 0, 20.0, 0) + "\n"
+                + F(2, 0) + "\n*END\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "not a multiple"):
+            convert(p, SI, KGMM, p + ".o.k", self_check=False)
+
+    def test_boundary_radiation_set(self):
+        # PSEROD sits in field 7 here (fields 3-6 blank), unlike CONVECTION
+        deck = ("*KEYWORD\n*BOUNDARY_RADIATION_SET\n"
+                + F(2, 1, "", "", "", "", 0) + "\n"
+                + F(0, "5.55660E-8", 0, 300.0, 0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*BOUNDARY_RADIATION_SET")
+        self.assertEqual(int(lines[i + 1][60:70]), 0)                 # PSEROD
+        self.assertAlmostEqual(float(lines[i + 2][10:20]), 5.5566e-17)
+        self.assertAlmostEqual(float(lines[i + 2][30:40]), 300.0)     # T_inf
+
+    def test_control_thermal_solver_sbc(self):
+        deck = ("*KEYWORD\n*CONTROL_THERMAL_SOLVER\n"
+                + F(0, 1, 11, "", 8, 1.0, 1.0, "5.67000E-8") + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*CONTROL_THERMAL_SOLVER")
+        self.assertAlmostEqual(float(lines[i + 1][50:60]), 1.0)       # EQHEAT
+        self.assertAlmostEqual(float(lines[i + 1][60:70]), 1.0)       # FWORK
+        self.assertAlmostEqual(float(lines[i + 1][70:80]), 5.67e-17)  # SBC
+
+    def test_load_thermal_variable_node(self):
+        deck = ("*KEYWORD\n*LOAD_THERMAL_VARIABLE_NODE\n"
+                + F(1, 1.0, 0.0, 1) + "\n" + F(2, 1.17, 20.0, 1) + "\n"
+                "*DEFINE_CURVE\n" + F(1, 0, 0.0, 0.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("0.0", w=20) + F("1.0", w=20) + "\n"
+                + F("1.0", w=20) + F("1.0", w=20) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*LOAD_THERMAL_VARIABLE_NODE")
+        self.assertAlmostEqual(float(lines[i + 2][10:20]), 1.17)      # TS
+        self.assertAlmostEqual(float(lines[i + 2][20:30]), 20.0)      # TB
+        j = lines.index("*DEFINE_CURVE")
+        # the curve is a pure multiplier: abscissa is a time, ordinate is not
+        self.assertAlmostEqual(float(lines[j + 3][0:20]), 1000.0)
+        self.assertAlmostEqual(float(lines[j + 3][20:40]), 1.0)

@@ -56,6 +56,15 @@ SPEC_HEAT : Dim = (0, 2, -2)     # specific heat, ASSUMING both systems share
                                  # the same temperature unit (K or degC)
 THERM_COND: Dim = (1, 1, -3)     # thermal conductivity W/(m*K), same
                                  # temperature-unit assumption as SPEC_HEAT
+HEAT_FLUX : Dim = (1, 0, -3)     # power per unit AREA (W/m^2).  Under the
+                                 # same temperature-unit assumption this is
+                                 # also the convection coefficient
+                                 # h = q''/dT and the radiation coefficient
+                                 # f = sigma*eps*F = q''/dT^4 (including the
+                                 # Stefan-Boltzmann constant itself): the
+                                 # temperature factor is 1, so all three
+                                 # collapse onto the same signature and none
+                                 # of them carries a length exponent.
 # surface tension (force/length) shares STIFF's (1, 0, -2) signature
 # power-spectral densities: (base quantity)^2 per frequency = q^2 * time
 ACCEL_PSD : Dim = (0, 2, -3)     # acceleration PSD, accel^2/(cycles/time)
@@ -82,6 +91,7 @@ DIM_NAMES = {
     INV_PRESSURE: "1/stress", ACOUST_IMP: "acoustic impedance p/v",
     SPEC_HEAT: "specific heat (same temp unit)",
     THERM_COND: "thermal conductivity (same temp unit)",
+    HEAT_FLUX: "heat flux | h | sigma (same temp unit)",
     ACCEL_PSD: "PSD accel^2/freq", VEL_PSD: "PSD vel^2/freq",
     DISP_PSD: "PSD disp^2/freq", PRES_PSD: "PSD pressure^2/freq",
     FORCE_PSD: "PSD force^2/freq",
@@ -101,6 +111,7 @@ DIM_BY_NAME = {
     "powervol": PWR_VOL, "power": POWER, "massrate": DAMP,
     "invpressure": INV_PRESSURE, "invstress": INV_PRESSURE,
     "impedance": ACOUST_IMP, "acoustimp": ACOUST_IMP,
+    "heatflux": HEAT_FLUX, "htc": HEAT_FLUX,
     "accelpsd": ACCEL_PSD, "velpsd": VEL_PSD, "disppsd": DISP_PSD,
     "prespsd": PRES_PSD, "forcepsd": FORCE_PSD,
 }
