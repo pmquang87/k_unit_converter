@@ -1519,8 +1519,8 @@ def h_boundary_temperature(block: Block, ctx, edit: bool) -> None:
         ctx.count(block.name)
 
 
-def _thermal_coef_pair(block: Block, ctx, edit: bool, li: int, what: str,
-                       page: str) -> None:
+def _thermal_coef_pair(block: Block, ctx, edit: bool, li: int,
+                       what: str) -> None:
     """Shared Card 2 of *BOUNDARY_CONVECTION_SET / *BOUNDARY_RADIATION_SET.
 
     Layout XLCID XMULT TLCID TMULT LOC, where X is the convection coefficient
@@ -1577,7 +1577,7 @@ def _thermal_pairs(block: Block, ctx, edit: bool, what: str, page: str):
                   "understood, refusing to guess.")
         return
     for i in range(1, len(data), 2):
-        _thermal_coef_pair(block, ctx, edit, data[i], what, page)
+        _thermal_coef_pair(block, ctx, edit, data[i], what)
     if edit:
         ctx.count(block.name)
 
