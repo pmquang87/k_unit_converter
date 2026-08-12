@@ -154,7 +154,10 @@ power-per-area signature under the same-temperature-unit assumption), the ALE
 gas mixture (`*MAT_GAS_MIXTURE`'s RUNIV switches its species cards between
 per-mass and per-mole), `*MAT_FABRIC`, `MAT_054/055`, `MAT_005`
 (A0/A1/A2 are a stress², a stress and a pure number), `*MAT_SIMPLIFIED_RUBBER/FOAM`,
-`*CONTACT_DRAWBEAD`, and the isogeometric family (only
+`*CONTACT_DRAWBEAD`, `*FREQUENCY_DOMAIN_RANDOM_VIBRATION`'s UNIT flag (which
+declares a whole unit system, like the acoustic BEM IUNITS, and is remapped
+rather than scaled — its g-based PSD ordinate carries no length exponent),
+and the isogeometric family (only
 `*IGA_2D_NURBS_XYZ`'s control points, `*SECTION_IGA_SHELL`'s thickness and
 `*IGA_SHELL`'s NISR/NISS-when-negative carry units; u/v/w and knots do not).
 Temperature fields are classified but **never rescaled**. Anything else
