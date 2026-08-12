@@ -2386,3 +2386,33 @@ class Contact2DTests(unittest.TestCase):
         p = _write(deck)
         with self.assertRaisesRegex(ConvertError, "VC"):
             convert(p, SI, TON, p + ".o.k", self_check=False)
+
+
+class CustomProbeTests(unittest.TestCase):
+    """detect() reads Spec.probe, so a material that lives in a handler
+    contributes no evidence at all unless CUSTOM_PROBES names its fields -
+    and the thermal-only decks have no other material to fall back on."""
+
+    THERMAL_ONLY = ("*KEYWORD\n*MAT_THERMAL_ISOTROPIC\n"
+                    + F(1, 7850.0, 0, 0.0, 0.0, 0.0) + "\n"
+                    + F(460.0, 55.6) + "\n"
+                    "*NODE\n"
+                    "       1             0.0             0.0             0.0\n"
+                    "*END\n")
+
+    def test_thermal_density_is_probed(self):
+        v = detect(_write(self.THERMAL_ONLY), use_headers=False)
+        self.assertEqual(v.system, SI)
+        self.assertTrue(any("material density 7850" in e for e in v.evidence),
+                        v.evidence)
+
+    def test_self_check_runs_on_a_thermal_only_deck(self):
+        p = _write(self.THERMAL_ONLY)
+        ctx = convert(p, SI, TON, p + ".o.k", self_check=True)
+        self.assertTrue(ctx.self_check.startswith("OK"), ctx.self_check)
+
+    def test_probe_table_keys_resolve_to_handlers(self):
+        # a stale key would silently stop contributing evidence
+        from kunit.schema import CUSTOM_PROBES, resolve
+        for name in CUSTOM_PROBES:
+            self.assertEqual(resolve(name)[0], "custom", name)

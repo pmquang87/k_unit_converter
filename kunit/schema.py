@@ -4906,17 +4906,24 @@ _ROUTER_RULES: List[Tuple[str, Callable[[str], Tuple[str, object]]]] = [
 ]
 
 
+def resolve_base(name: str) -> str:
+    """The name resolve() actually looks up: _TITLE/_ID stripped, then the
+    numeric *MAT alias applied.  Exposed so callers that key their own tables
+    off a keyword (detect()'s CUSTOM_PROBES) agree with the router."""
+    base = name
+    for opt in ("_TITLE", "_ID"):
+        if base.endswith(opt):
+            base = base[: -len(opt)]
+    return _MAT_ALIASES.get(base, base)
+
+
 def resolve(name: str):
     """Classify a keyword. Returns (kind, payload):
     kind in {spec, custom, white, soft, hard, unknown}.
 
     Precedence: the exact-match tables and the _TITLE/_ID + _MAT_ALIASES
     normalisation are consulted first, then the ordered prefix _ROUTER_RULES."""
-    base = name
-    for opt in ("_TITLE", "_ID"):
-        if base.endswith(opt):
-            base = base[: -len(opt)]
-    base = _MAT_ALIASES.get(base, base)
+    base = resolve_base(name)
     if name in HARD_FLAGS or base in HARD_FLAGS:
         return "hard", HARD_FLAGS.get(name) or HARD_FLAGS[base]
     if base in CUSTOM:
@@ -4933,6 +4940,27 @@ def resolve(name: str):
             return rule(name)
     return "unknown", None
 
+
+# Detection probes for materials that live in a handler rather than a Spec, so
+# Spec.probe cannot reach them.
+#
+# Deliberately tiny.  A probe only earns its place if it makes the self-check
+# DECISIVE; one that merely lands in _log_band's wide fallback contributes +2
+# to several systems at once and can outrank the truth.  Probing
+# *MAT_ENHANCED_COMPOSITE_DAMAGE's EA, for instance, made the correctly
+# converted Salzburg composite deck (its only evidence being EA = 147000 MPa)
+# self-check as slinch-in-s, because 147000 psi happens to land within 5% of
+# the 1.0e9 Pa modulus anchor while 147 GPa matches no anchor at all.  Silence
+# ("no evidence - self-check skipped") is the honest answer for such decks.
+#
+# Keyed by the BASE name resolve() produces, so numeric aliases work too.
+CUSTOM_PROBES: Dict[str, Dict[str, Tuple[int, int]]] = {
+    # R16 Vol II p.3-2, Card 1 TMID TRO ...  TRO is a plain material mass
+    # density, the quantity _DENSITY_ANCHORS is written against, and the
+    # thermal-only decks it appears in have no other probe-able material at
+    # all - ex_21/22/23 carry 7850 and hit the steel anchor outright.
+    "MAT_THERMAL_ISOTROPIC": {"ro": (0, 1)},
+}
 
 # scan-time extras for keywords that already have a Spec
 SCAN_EXTRA: Dict[str, Callable] = {

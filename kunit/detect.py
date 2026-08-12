@@ -122,14 +122,20 @@ def detect(path: str, follow_includes: bool = True,
     dets: List[float] = []
     icfd_ros: List[float] = []
     icfd_viss: List[float] = []
-    from .schema import resolve, _strip_title
+    from .schema import resolve, resolve_base, CUSTOM_PROBES, _strip_title
     for kf in files:
         for block in kf.blocks:
             kind, payload = resolve(block.name)
-            if kind != "spec" or not payload.probe:
+            if kind == "spec" and payload.probe:
+                probe = payload.probe
+            elif kind == "custom":
+                probe = CUSTOM_PROBES.get(resolve_base(block.name))
+            else:
+                probe = None
+            if not probe:
                 continue
             data = _strip_title(block, list(block.data))
-            for key, (ci, fi) in payload.probe.items():
+            for key, (ci, fi) in probe.items():
                 if ci < len(data):
                     v = kf.get_number(data[ci], STD8, block.long, fi)
                     if v:
