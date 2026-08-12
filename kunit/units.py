@@ -45,6 +45,13 @@ STIFF_LEN : Dim = (1, -2, -2)    # stiffness per length (tiebreak CN, stress/len
 STRESS_M3 : Dim = (-3, 3, 6)     # 1/stress^3 (MAT_022 ALPH nonlinear shear term)
 PWR_VOL   : Dim = (1, -1, -3)    # power/volume: EOS energy-deposition rate
                                  # dE/dt, E being energy per reference volume
+POWER     : Dim = (1, 2, -3)     # power (SSD_ERP reference value ERPREF, the
+                                 # radiated acoustic power a dB scale is
+                                 # referred to; usually 1e-12 W in SI)
+INV_PRESSURE: Dim = (-1, 1, 2)   # 1/stress (MAT_102 HC and ALPHA,
+                                 # MAT_ELASTIC_PLASTIC_HYDRO_SPALL A2)
+ACOUST_IMP: Dim = (1, -2, -1)    # acoustic impedance p/v (BEM BEMTYP=4 and
+                                 # acoustic FEM VAD=41/42 curve ordinates)
 SPEC_HEAT : Dim = (0, 2, -2)     # specific heat, ASSUMING both systems share
                                  # the same temperature unit (K or degC)
 THERM_COND: Dim = (1, 1, -3)     # thermal conductivity W/(m*K), same
@@ -68,9 +75,11 @@ DIM_NAMES = {
     PRESSURE: "pressure/stress", FORCE: "force", MOMENT: "moment/energy",
     MASS_AREA: "mass/area", MASS_LEN: "mass/length", INERTIA: "mass inertia",
     STIFF: "stiffness | energy/area | surf.tens.", VISCOSITY: "viscosity (P*t)",
-    DC_FRIC: "1/velocity", ANG_ACCEL: "1/time^2", DAMP: "damping F/v",
+    DC_FRIC: "1/velocity", ANG_ACCEL: "1/time^2",
+    DAMP: "damping F/v | mass flow rate",
     ROT_DAMP: "damping M/(rad/t)", STIFF_LEN: "stiffness/length",
-    STRESS_M3: "1/stress^3", PWR_VOL: "power/volume",
+    STRESS_M3: "1/stress^3", PWR_VOL: "power/volume", POWER: "power",
+    INV_PRESSURE: "1/stress", ACOUST_IMP: "acoustic impedance p/v",
     SPEC_HEAT: "specific heat (same temp unit)",
     THERM_COND: "thermal conductivity (same temp unit)",
     ACCEL_PSD: "PSD accel^2/freq", VEL_PSD: "PSD vel^2/freq",
@@ -89,7 +98,9 @@ DIM_BY_NAME = {
     "pressure": PRESSURE, "stress": PRESSURE, "modulus": PRESSURE,
     "force": FORCE, "moment": MOMENT, "energy": ENERGY,
     "stiffness": STIFF, "damping": DAMP, "viscosity": VISCOSITY,
-    "powervol": PWR_VOL,
+    "powervol": PWR_VOL, "power": POWER, "massrate": DAMP,
+    "invpressure": INV_PRESSURE, "invstress": INV_PRESSURE,
+    "impedance": ACOUST_IMP, "acoustimp": ACOUST_IMP,
     "accelpsd": ACCEL_PSD, "velpsd": VEL_PSD, "disppsd": DISP_PSD,
     "prespsd": PRES_PSD, "forcepsd": FORCE_PSD,
 }
@@ -254,6 +265,22 @@ CSCM_UNITS: Dict[Tuple[str, str, str], int] = {
     ("kg", "m", "s"): 4,
 }
 CSCM_UNIT_SYSTEMS = {v: UnitSystem(*k) for k, v in CSCM_UNITS.items()}
+
+
+# ── *FREQUENCY_DOMAIN_ACOUSTIC_BEM IUNITS flag support ───────────────────────
+# IUNITS (Card 2, field 8) declares the unit system the acoustic BEM input is
+# given in; LS-DYNA converts it internally to MKS "so that the reference
+# pressure is not too small" (R16 Vol I p.23-8 + Remark 5 p.23-15):
+#   EQ.0: do not apply a unit change     EQ.1: MKS (kg, m, s, N, Pa)
+#   EQ.2: lbf*s^2/in, inch, s, lbf, psi  EQ.3: kg, mm, ms, kN, GPa
+#   EQ.4: ton, mm, s, N, MPa
+BEM_UNITS: Dict[Tuple[str, str, str], int] = {
+    ("kg", "m", "s"): 1,
+    ("slinch", "in", "s"): 2,
+    ("kg", "mm", "ms"): 3,
+    ("ton", "mm", "s"): 4,
+}
+BEM_UNIT_SYSTEMS = {v: UnitSystem(*k) for k, v in BEM_UNITS.items()}
 
 
 def blast_unit5_factors(sys: UnitSystem) -> Tuple[float, float, float, float]:
