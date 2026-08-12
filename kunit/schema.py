@@ -2170,14 +2170,15 @@ def h_mat_fabric(block: Block, ctx, edit: bool) -> None:
                   "layout not modelled, convert manually.")
         return
     if not (0 < x0 < 1):
-        for fi, nm in ((1, "FLC"), (2, "FAC")):
+        for fi, nm, what in ((1, "FLC", "porous leakage flow coefficient"),
+                             (2, "FAC", "characteristic fabric parameter")):
             if kf.get_number(data[2], STD8, block.long, fi):
                 ctx.error(
-                    f"*{block.name}: {nm} is nonzero, and R16 defines it only "
-                    f"as an 'optional {'porous leakage flow' if fi == 1 else 'characteristic fabric'}"
-                    f" parameter. (See theory manual.)' (Vol II p.2-320) - "
-                    "its units are stated nowhere, so it cannot be rescaled "
-                    "or safely left alone. Convert this fabric manually.")
+                    f"*{block.name}: {nm} is nonzero, and R16 Vol II p.2-320 "
+                    f"defines it only as an 'optional {what}. (See theory "
+                    "manual.)' - its units are stated nowhere, so it can "
+                    "neither be rescaled nor safely left alone. Convert this "
+                    "fabric manually.")
                 return
     if not edit:
         ela = kf.get_number(data[2], STD8, block.long, 3)
