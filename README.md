@@ -165,12 +165,8 @@ aborts loudly by design; extending = one `Spec` line in `kunit/schema.py`.
 
 ## Validation
 
-<<<<<<< HEAD
 * A comprehensive unittest suite (run `python -m unittest discover -s tests`),
   green on the CI matrix (Linux + Windows, Python 3.9 and 3.13).
-=======
-* 164 unit tests (`python -m unittest discover -s tests`).
->>>>>>> 21ffe06 (Register the *INITIAL_AXIAL_FORCE_BEAM preload curve)
 * End-to-end: the 8.6 MB W13 blast-vehicle deck (kg/m/s → ton/mm/s) matches a
   manually converted, OpenRadioss-starter-validated reference on **all
   110,565 data lines with zero numeric differences**; its k2rad→OpenRadioss
