@@ -12,7 +12,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kunit import convert, parse_system
-from kunit.schema import resolve, h_contact, h_define_table
+from kunit.schema import (resolve, h_contact, h_define_table,
+                          h_mat_enhanced_composite_damage, h_mat_spotweld,
+                          h_mat_simplified_rubber_foam)
 
 SI = parse_system("kg-m-s")
 TON = parse_system("ton-mm-s")
@@ -47,18 +49,28 @@ class ClassificationTests(unittest.TestCase):
     """resolve() verdicts for every added keyword."""
 
     def test_kinds(self):
-        spec = {"MAT_002", "MAT_054", "MAT_055", "MAT_057", "MAT_063",
-                "MAT_098", "MAT_100", "MAT_123", "MAT_181",
+        spec = {"MAT_002", "MAT_057", "MAT_063",
+                "MAT_098", "MAT_123",
                 "MAT_ORTHOTROPIC_ELASTIC", "MAT_SIMPLIFIED_JOHNSON_COOK",
-                "MAT_SPOTWELD", "MAT_CRUSHABLE_FOAM", "MAT_LOW_DENSITY_FOAM",
-                "MAT_ENHANCED_COMPOSITE_DAMAGE",
+                "MAT_CRUSHABLE_FOAM", "MAT_LOW_DENSITY_FOAM",
                 "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY",
-                "MAT_SIMPLIFIED_RUBBER/FOAM", "AIRBAG_REFERENCE_GEOMETRY"}
+                "AIRBAG_REFERENCE_GEOMETRY"}
         for name in spec:
             self.assertEqual(resolve(name)[0], "spec", name)
+        # these four families outgrew a flat Spec: MAT_054/055's TFAIL changes
+        # meaning at 0.1, MAT_100's resultants double as curve ids when
+        # negative, and MAT_181's AVGOPT/PR do the same by sign
         custom = {"CONTACT_AUTOMATIC_SINGLE_SURFACE_MORTAR": h_contact,
                   "DEFINE_TABLE_2D": h_define_table,
-                  "DEFINE_TABLE_3D": h_define_table}
+                  "DEFINE_TABLE_3D": h_define_table,
+                  "MAT_054": h_mat_enhanced_composite_damage,
+                  "MAT_055": h_mat_enhanced_composite_damage,
+                  "MAT_ENHANCED_COMPOSITE_DAMAGE":
+                      h_mat_enhanced_composite_damage,
+                  "MAT_100": h_mat_spotweld,
+                  "MAT_SPOTWELD": h_mat_spotweld,
+                  "MAT_181": h_mat_simplified_rubber_foam,
+                  "MAT_SIMPLIFIED_RUBBER/FOAM": h_mat_simplified_rubber_foam}
         for name, fn in custom.items():
             self.assertEqual(resolve(name), ("custom", fn), name)
         for name in ("SECTION_TSHELL", "DEFINE_COORDINATE_VECTOR",
@@ -152,7 +164,15 @@ class MaterialSpecTests(unittest.TestCase):
         self.assertAlmostEqual(float(c2[0:10]), 8000.0)     # GAB
         self.assertAlmostEqual(float(c2[30:40]), 2000.0)    # KF bulk modulus
         self.assertAlmostEqual(float(c4[70:80]), 0.02)      # DFAILS strain
-        self.assertAlmostEqual(float(c5[10:20]), 0.2)       # ALPH unchanged
+        # ALPH is NOT dimensionless.  R16 Vol II p.2-426 defines it as "shear
+        # stress parameter for the nonlinear term; see *MAT_022", and p.2-249
+        # spells *MAT_022's out as "in units of [stress-3]" - which is why the
+        # *MAT_022 spec in schema.py has scaled it as STRESS_M3 all along.
+        # (-3, 3, 6) over kg-m-s -> ton-mm-s is 1e9 x 1e9 x 1 = 1e18.
+        self.assertAlmostEqual(float(c5[10:20]) / 2.0e17, 1.0)   # ALPH
+        self.assertAlmostEqual(float(c5[0:10]), 0.0)        # TFAIL untouched
+        self.assertAlmostEqual(float(c5[20:30]), 1.0)       # SOFT factor
+        self.assertAlmostEqual(float(c5[50:60]), 0.01)      # DFAILT strain
         self.assertAlmostEqual(float(c6[0:10]), 1500.0)     # XC
         self.assertAlmostEqual(float(c6[10:20]), 2000.0)    # XT
 
@@ -190,15 +210,34 @@ class MaterialSpecTests(unittest.TestCase):
                          ctx.warnings)
 
     def test_mat_181_simplified_rubber(self):
+        # MAT_181 is a 2-card material (R16 Vol II p.2-1210): Card 2 carries
+        # the specimen gauge dimensions and the LC/TBID that defines the
+        # response, so a 1-card deck is not a legal *MAT_181 at all.
         deck = ("*KEYWORD\n*MAT_181\n"
-                + F(1, 1000.0, "2.0E9", 0.0, 0.0, 0.0, 0, 0) + "\n*END\n")
-        lines, _ = _conv(deck)
+                + F(1, 1000.0, "2.0E9", 0.0, "5.0E5", 0.0, 0, 0) + "\n"
+                + F(0.05, 0.02, 0.002, 7, 0.0, 0.0, 0.0, 0.0) + "\n"
+                "*DEFINE_CURVE\n" + F(7, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("0.0", "0.0", w=20) + "\n"
+                + F("0.01", "250.0", w=20) + "\n*END\n")
+        lines, ctx = _conv(deck)
         i = lines.index("*MAT_181")
-        c1 = lines[i + 1]
+        c1, c2 = lines[i + 1], lines[i + 2]
         self.assertAlmostEqual(float(c1[10:20]), 1.0e-9)    # RO
         self.assertAlmostEqual(float(c1[20:30]), 2000.0)    # KM 2e9 -> MPa
+        self.assertAlmostEqual(float(c1[40:50]), 0.5)       # G 5e5 -> MPa
+        # SGL/SW/ST are the specimen gauge length, width and thickness
+        self.assertAlmostEqual(float(c2[0:10]), 50.0)
+        self.assertAlmostEqual(float(c2[10:20]), 20.0)
+        self.assertAlmostEqual(float(c2[20:30]), 2.0)
+        self.assertEqual(int(c2[30:40]), 7)                 # LC id untouched
+        # the curve is force against change in gauge length, not stress/strain
+        ci = lines.index("*DEFINE_CURVE")
+        self.assertAlmostEqual(float(lines[ci + 3][0:20]), 10.0)    # m -> mm
+        self.assertAlmostEqual(float(lines[ci + 3][20:40]), 250.0)  # N -> N
+        self.assertFalse(any("unreferenced" in w for w in ctx.warnings),
+                         ctx.warnings)
 
-    def test_mat_100_spotweld_card1_scaled_card2_warned(self):
+    def test_mat_100_spotweld_resultants_scaled_by_kind(self):
         deck = ("*KEYWORD\n*MAT_100\n"
                 + F(1, 7850.0, "2.1E11", 0.3, "3.5E8", "1.0E9", 0.0, "1.0E20")
                 + "\n"
@@ -210,9 +249,15 @@ class MaterialSpecTests(unittest.TestCase):
         self.assertAlmostEqual(float(c1[20:30]), 2.1e5)     # E
         self.assertAlmostEqual(float(c1[40:50]), 350.0)     # SIGY
         self.assertAlmostEqual(float(c1[50:60]), 1000.0)    # ET
-        self.assertAlmostEqual(float(c2[10:20]), 5.0e4)     # NRR left unscaled
-        self.assertTrue(any("resultants" in w for w in ctx.warnings),
-                        ctx.warnings)
+        self.assertAlmostEqual(float(c2[0:10]), 0.1)        # EFAIL strain
+        # NRR/NRS/NRT are FORCE resultants and MRR/MSS/MTT MOMENT resultants,
+        # so they do not share a factor: kg-m-s -> ton-mm-s leaves force alone
+        # (N -> N) but takes moments from N*m to N*mm
+        for sl in (slice(10, 20), slice(20, 30), slice(30, 40)):
+            self.assertAlmostEqual(float(c2[sl]), 5.0e4)
+        for sl in (slice(40, 50), slice(50, 60), slice(60, 70)):
+            self.assertAlmostEqual(float(c2[sl]), 10000.0)
+        self.assertEqual(ctx.warnings, [])
 
 
 class DefineTableTests(unittest.TestCase):
