@@ -1943,3 +1943,87 @@ class FabricTests(unittest.TestCase):
         j = lines.index(F(11, 0, 1.0, 1.0, 0.0, 0.0, 0, 0))
         self.assertAlmostEqual(float(lines[j + 2][0:20]), 0.1)      # strain
         self.assertAlmostEqual(float(lines[j + 2][20:40]) / (50000.0 * fp), 1.0)
+
+
+class ConstraintContactTests(unittest.TestCase):
+    """*CONSTRAINED_INTERPOLATION, *CONSTRAINED_JOINT_PLANAR and
+    *CONTACT_DRAWBEAD (R16 Vol I p.10-41, p.10-61, p.11-53),
+    slinch-in-s -> ton-mm-s."""
+
+    SLIN = parse_system("slinch-in-s")
+
+    def _conv(self, deck, **kw):
+        p = _write(deck)
+        out = p + ".o.k"
+        ctx = convert(p, self.SLIN, TON, out, self_check=False, **kw)
+        return _lines(out), ctx
+
+    def test_constrained_interpolation_is_dimensionless(self):
+        deck = ("*KEYWORD\n*CONSTRAINED_INTERPOLATION\n"
+                + F(101, 2, 3, 0, 0, 0, 0) + "\n"
+                + F(41, 123, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0) + "\n"
+                + F(42, 123, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        self.assertEqual(ctx.unknown, {})
+        i = lines.index("*CONSTRAINED_INTERPOLATION")
+        self.assertEqual(lines[i + 1], F(101, 2, 3, 0, 0, 0, 0))
+        self.assertEqual(lines[i + 2], F(41, 123, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0))
+
+    def test_constrained_joint_planar_id_is_dimensionless(self):
+        deck = ("*KEYWORD\n*CONSTRAINED_JOINT_PLANAR_ID\n"
+                + F(0) + "\n"
+                + F(128, 126, 129, 127, 0, 0, 1.0, 1.0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        self.assertEqual(ctx.unknown, {})
+        # RPS is a RELATIVE penalty-stiffness factor, not a stiffness
+        i = lines.index("*CONSTRAINED_JOINT_PLANAR_ID")
+        self.assertEqual(lines[i + 2], F(128, 126, 129, 127, 0, 0, 1.0, 1.0))
+
+    DRAWBEAD = ("*KEYWORD\n*CONTACT_DRAWBEAD\n"
+                + F(1, 1, 4, 2, 0, 1, 1, 1) + "\n"
+                + F(0.1, 0.0, 0.0, 0.0, 0.0, 0, 0.0, "1.00000E20") + "\n"
+                + F(0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0) + "\n"
+                + F(3, 0, 0.17436, 2.0, 0, 0, 0, 0) + "\n"
+                "*DEFINE_CURVE\n" + F(3, 0, 0.0, 0.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("0.0", w=20) + F("0.0", w=20) + "\n"
+                + F("0.12", w=20) + F("130.0", w=20) + "\n*END\n")
+
+    def test_contact_drawbead_depth_and_line_load_curve(self):
+        lines, ctx = self._conv(self.DRAWBEAD)
+        self.assertEqual(ctx.unknown, {})
+        fl = float(factor(LENGTH, self.SLIN, TON))
+        fs = float(factor(FORCE, self.SLIN, TON)) / fl     # force per length
+        i = lines.index("*CONTACT_DRAWBEAD")
+        self.assertAlmostEqual(float(lines[i + 4][20:30]) / (0.17436 * fl), 1.0)
+        self.assertAlmostEqual(float(lines[i + 4][30:40]), 2.0)   # DFSCL stays
+        j = lines.index(F(3, 0, 0.0, 0.0, 0.0, 0.0, 0, 0))
+        self.assertAlmostEqual(float(lines[j + 2][0:20]) / (0.12 * fl), 1.0)
+        self.assertAlmostEqual(float(lines[j + 2][20:40]) / (130.0 * fs), 1.0)
+
+    def test_contact_drawbead_negative_lcidrf_refused(self):
+        deck = self.DRAWBEAD.replace(F(3, 0, 0.17436, 2.0, 0, 0, 0, 0),
+                                     F(-3, 0, 0.17436, 2.0, 0, 0, 0, 0))
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "LCIDRF"):
+            convert(p, self.SLIN, TON, p + ".o.k", self_check=False)
+
+    def test_contact_drawbead_nbead_card(self):
+        # NBEAD > 0 adds Card 4.4 POINT1 POINT2 WIDTH EFFHGT
+        deck = self.DRAWBEAD.replace(
+            F(3, 0, 0.17436, 2.0, 0, 0, 0, 0),
+            F(3, 0, 0.17436, 2.0, 0, 0, 0, 3) + "\n"
+            + F(11, 22, 0.4, 0.05))
+        lines, ctx = self._conv(deck)
+        fl = float(factor(LENGTH, self.SLIN, TON))
+        i = lines.index("*CONTACT_DRAWBEAD")
+        self.assertEqual(int(lines[i + 5][0:10]), 11)              # POINT1
+        self.assertAlmostEqual(float(lines[i + 5][20:30]) / (0.4 * fl), 1.0)
+        self.assertAlmostEqual(float(lines[i + 5][30:40]) / (0.05 * fl), 1.0)
+
+    def test_contact_drawbead_bending_stays_unknown(self):
+        # _BENDING inserts Card 4.2 ahead of everything that follows
+        deck = self.DRAWBEAD.replace("*CONTACT_DRAWBEAD",
+                                     "*CONTACT_DRAWBEAD_BENDING")
+        p = _write(deck)
+        with self.assertRaises(ConvertError):
+            convert(p, self.SLIN, TON, p + ".o.k", self_check=False)

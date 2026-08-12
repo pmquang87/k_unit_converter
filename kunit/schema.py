@@ -830,8 +830,21 @@ WHITELIST = {
     # itself (Remark 3, p.10-68), and DAMP, a "damping scale factor on default
     # damping value" - both pure factors.  Exact names only: the _FAILURE and
     # _LOCAL spellings add TIME/FORCE/MOMENT cards and must stay unknown.
+    # PLANAR joins them: p.10-62's card summary lists Card 2 as "required for
+    # joint types: MOTOR, GEARS, RACK_AND_PINION, PULLEY, and SCREW", which
+    # PLANAR is not, and the plane itself comes from the node geometry
+    # (Fig. 10-20) rather than from any field.  The _ID option only prepends
+    # an id + 70-character heading card, and resolve() strips _ID.
     "CONSTRAINED_JOINT_REVOLUTE", "CONSTRAINED_JOINT_SPHERICAL",
-    "CONSTRAINED_JOINT_TRANSLATIONAL",
+    "CONSTRAINED_JOINT_TRANSLATIONAL", "CONSTRAINED_JOINT_PLANAR",
+    # p.10-41..10-46: Card 1 ICID DNID DDOF CIDD ITYP IDNSW FGM is ids, a
+    # packed dof digit-string and flags; the repeating Card 2 adds a node id,
+    # a dof string and six weighting factors for which "there is no
+    # requirement on the values that are chosen ... The default value for the
+    # weighting factor is unity" - ratios.  The LOCAL option's Card 3 holds
+    # one more coordinate-system ID.  Not one field in the keyword carries a
+    # unit, despite the name suggesting interpolated positions.
+    "CONSTRAINED_INTERPOLATION", "CONSTRAINED_INTERPOLATION_LOCAL",
     # p.10-181: NID + NSID, a shell node tied to a set of solid nodes.
     "CONSTRAINED_SHELL_TO_SOLID",
     # p.10-224: NSID EPPF ETYPE [PID].  EPPF is a plastic strain, volumetric
@@ -1094,6 +1107,7 @@ def h_contact(block: Block, ctx, edit: bool) -> None:
     data = _strip_title(block, list(block.data))
     opts = block.name.split("_")
     tiebreak = "TIEBREAK" in block.name
+    drawbead = "DRAWBEAD" in block.name
     mortar = "MORTAR" in opts
     plan: List[Dict[int, Dim]] = []
     if "MPP" in opts:
@@ -1111,6 +1125,31 @@ def h_contact(block: Block, ctx, edit: bool) -> None:
         if sfsa is not None and sfsa < 0 and not edit:
             ctx.register_curve(int(-sfsa), LENGTH, PRESSURE,
                                block.name + " Mortar p(penetration)")
+    if drawbead and len(data) > mpp_off + 3:
+        # R16 Vol I p.11-53: LCIDRF LCIDNF DBDTH DFSCL NUMINT DBPID ELOFF
+        # NBEAD.  Both curves give a restraining force "per unit draw bead
+        # length as a function of displacement" - a line load (1,0,-2),
+        # numerically kunit's STIFF but semantically not a stiffness - and
+        # DBDTH is the bead depth that turns contact displacement into that
+        # abscissa.  The deck's own header on curve 3 of pan.drawbead.31
+        # spells the axes out: "DEPTH   FORC/LGTH".
+        db = data[mpp_off + 3]
+        lcidrf = _numint(kf, db, STD8, block.long, 0) or 0
+        if lcidrf < 0:
+            ctx.error(
+                f"*{block.name}: LCIDRF={lcidrf} switches the curve to "
+                "'maximum bead force as a function of normalized draw bead "
+                "length' (R16 Vol I p.11-53), and the manual says 'force' "
+                "there where the positive branch says 'force per unit draw "
+                "bead length' - the ordinate is ambiguous, so this bead is "
+                "not converted.  Convert it manually.")
+            return
+        if not edit:
+            for fi in (0, 1):                            # LCIDRF LCIDNF
+                lc = _numint(kf, db, STD8, block.long, fi)
+                if lc:
+                    ctx.register_curve(lc, LENGTH, STIFF,
+                                       block.name + " force/length(depth)")
     if not edit:
         return
     if tiebreak:
@@ -1119,8 +1158,17 @@ def h_contact(block: Block, ctx, edit: bool) -> None:
         # It comes BEFORE the optional cards A and B.
         plan.append({1: PRESSURE, 2: PRESSURE, 4: STIFF, 5: STIFF,
                      7: STIFF_LEN})
-    else:
-        plan.append({})                                  # A (flags)
+    elif drawbead:
+        plan.append({2: LENGTH})                         # Card 4.1 DBDTH
+        nbead = _numint(kf, data[mpp_off + 3], STD8, block.long, 7) or 0
+        if nbead > 0:
+            # Card 4.4 POINT1 POINT2 WIDTH EFFHGT (p.11-54): the bead width
+            # and the binder gap below which the bead starts to act.
+            plan.append({2: LENGTH, 3: LENGTH})
+    # Optional Card A follows Card 4, it does not replace it (card-order
+    # table, p.11-6): appending it unconditionally also fixes TIEBREAK decks,
+    # where Optional Card A used to be given Optional Card B's field map.
+    plan.append({})                                      # A (flags)
     # B: PENMAX SLDTHK SLDSTF.  PENMAX is a fraction of the segment
     # thickness for the a3/a5/a10/13/15/26 types but a maximum penetration
     # DISTANCE for Mortar (and the old 3/5/8/9/10 types), R16 Vol I p.11-102.
@@ -4403,8 +4451,13 @@ def _rule_contact(name):
     # h_contact's MPP plan handles.  The THERMAL option however inserts a
     # THRM card between the mandatory and optional cards (card-order
     # table, R16 Vol I p.11-6..11-7) and is not modelled - keep unknown.
-    if (name.startswith("CONTACT_TIEBREAK") or "DRAWBEAD" in name
+    # *CONTACT_DRAWBEAD's own Card 4.1 is modelled, but the _BENDING and
+    # _INITIALIZE options insert Cards 4.2 / 4.3 ahead of everything that
+    # follows (p.11-53..11-56) and are not.
+    if (name.startswith("CONTACT_TIEBREAK")
             or "DAMPING" in name or "THERMAL" in name
+            or ("DRAWBEAD" in name
+                and ("BENDING" in name or "INITIALIZE" in name))
             or name.startswith("CONTACT_2D") or "ENTITY" in name
             or "GEBOD" in name or "INTERIOR" in name
             or "GUIDED_CABLE" in name or "COUPLING" in name
