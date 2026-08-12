@@ -106,6 +106,18 @@ SPECS: Dict[str, Spec] = {
         C(),
         C({0: LENGTH, 1: LENGTH, 2: LENGTH, 3: LENGTH, 5: MASS_AREA})]),
     "SECTION_SOLID": Spec(cards=[C()], extra_ok=True),
+    # R16 Vol I p.41-52..41-57 (*SECTION_POINT_SOURCE_MIXTURE): Card 1 SECID
+    # LCIDT - LCIDVEL NIDLC1-3 IDIR, Card 2 LCMD1-8, then one repeating
+    # "Source Node Card" NODEID VECID ORIFA per source node.  ORIFA is "the
+    # orifice area at each point source"; everything else on the cards is an
+    # id or a flag, and all the physics rides on the curves: inflator
+    # stagnation temperature and average velocity against time (Remark 1),
+    # and the per-species mass flow rate m_dot(t), whose (1,0,-1) signature
+    # kunit already carries as DAMP.
+    "SECTION_POINT_SOURCE_MIXTURE": Spec(
+        cards=[C(), C()], repeat=C({2: AREA}),
+        curves=[(0, 1, TIME, TEMP), (0, 3, TIME, VELOCITY)]
+                + [(1, i, TIME, DAMP) for i in range(8)]),
     # R16 Vol I p.41-108..41-110 (*SECTION_SPH): SECID CSLH HMIN HMAX SPHINI
     # DEATH START SPHKERN.  CSLH and HMIN/HMAX are scale factors on the
     # smoothing length (dimensionless); SPHINI is an optional initial
@@ -438,6 +450,13 @@ SPECS: Dict[str, Spec] = {
     # prints "I" for TEMP, but its default is "0." and decks write floats.)
     "INITIAL_TEMPERATURE_SET": Spec(repeat=C({1: TEMP})),
     "INITIAL_TEMPERATURE_NODE": Spec(repeat=C({1: TEMP})),
+    # R16 Vol I p.28-40..28-41 (*INITIAL_GAS_MIXTURE): Card 1 SID STYPE MMGID
+    # TEMP, Card 2 RO1-RO8 "initial densities of the ALE material(s) ... for
+    # up to eight different gas species", in the species order of the
+    # *MAT_GAS_MIXTURE they belong to.  One keyword instance per AMMG, so the
+    # two cards are a fixed set and not a repeat.
+    "INITIAL_GAS_MIXTURE": Spec(cards=[
+        C({3: TEMP}), C({i: DENSITY for i in range(8)})]),
     # R17 Vol I p.30-77 (*INTERFACE_LINKING_SEGMENT): SSID IFID DEATH,
     # repeating.  R16 documents only SSID and IFID, but LS-PrePost already
     # writes the third column and DEATH is a real death time - whitelisting
@@ -687,6 +706,12 @@ _MAT_ALIASES = {
     "MAT_031": "MAT_FRAZER_NASH_RUBBER_MODEL",
     "MAT_090": "MAT_ACOUSTIC",
     "MAT_102": "MAT_INV_HYPERBOLIC_SIN",
+    "MAT_148": "MAT_GAS_MIXTURE",
+    # R16 Vol II p.2-2000: *MAT_ALE_GAS_MIXTURE is "exactly the same as
+    # *MAT_GAS_MIXTURE or *MAT_148".  Its _ADV spelling is NOT - it swaps PDV
+    # for a species count and repeats a 4-field card - and stays unknown
+    # because resolve() only ever strips _TITLE / _ID from a name.
+    "MAT_ALE_GAS_MIXTURE": "MAT_GAS_MIXTURE",
     "MAT_159": "MAT_CSCM", "MAT_159_CONCRETE": "MAT_CSCM_CONCRETE",
     "MAT_S01": "MAT_SPRING_ELASTIC", "MAT_S02": "MAT_DAMPER_VISCOUS",
     "MAT_S03": "MAT_SPRING_ELASTOPLASTIC",
@@ -1827,6 +1852,49 @@ def h_mat_thermal_isotropic(block: Block, ctx, edit: bool) -> None:
         ctx.warn(f"*{block.name}: {len(data) - 2} trailing card(s) beyond the "
                  "2-card layout left unscaled - the _TD, _TD_LC and "
                  "_PHASE_CHANGE variants are separate keywords; verify.")
+    ctx.count(block.name)
+
+
+def h_mat_gas_mixture(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol II p.2-1018..2-1024 (*MAT_GAS_MIXTURE / MAT_148).
+
+    Card 1 MID IADIAB RUNIV PDV.  RUNIV switches the whole rest of the
+    keyword between a per-MASS and a per-MOLE description of the gas species,
+    and the two use different dimensions in the same columns:
+
+      RUNIV = 0   Card 2 CVMASS1-8, Card 3 CPMASS1-8   - specific heats
+      RUNIV != 0  Card 2 MOLWT1-8   (mass per mole)
+                  Card 3 CPMOLE1-8, Card 4 B1-8, Card 5 C1-8
+                  - molar heat capacity and its first/second-order
+                    temperature coefficients
+
+    The mole is an invariant amount of substance and, per kunit's usual
+    convention, so is the temperature unit, so a per-mole-per-kelvin heat
+    capacity scales as a plain ENERGY and RUNIV (J/(mol*K)) with it.  That
+    keeps Remark 2's Cp(T) = [CPMOLE + B*T + C*T^2]/MOLWT consistent:
+    ENERGY / MASS = (0,2,-2) = SPEC_HEAT, matching the RUNIV = 0 branch.
+
+    (Do NOT calibrate against the worked example on p.2-1024 - it prints SI
+    values of RUNIV and MOLWT next to a ton-mm-s density and is internally
+    inconsistent by a factor of 1000.)
+    """
+    if not edit:
+        return
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    runiv = kf.get_number(data[0], STD8, block.long, 2)
+    kf.scale_field(data[0], STD8, block.long, 2, ctx.fac(MOMENT))     # RUNIV
+    per_card = ([SPEC_HEAT, SPEC_HEAT] if not runiv
+                else [MASS, MOMENT, MOMENT, MOMENT])
+    if len(data) - 1 > len(per_card):
+        ctx.warn(f"*{block.name}: {len(data) - 1 - len(per_card)} trailing "
+                 f"card(s) beyond the {len(per_card)} species cards this "
+                 f"RUNIV branch defines were left unscaled - verify.")
+    for dim, li in zip(per_card, data[1:]):
+        for fi in range(8):
+            kf.scale_field(li, STD8, block.long, fi, ctx.fac(dim))
     ctx.count(block.name)
 
 
@@ -4018,6 +4086,7 @@ CUSTOM: Dict[str, Callable] = {
     "MAT_INV_HYPERBOLIC_SIN": h_mat_inv_hyperbolic_sin,
     "MAT_SPOTWELD": h_mat_spotweld,
     "MAT_THERMAL_ISOTROPIC": h_mat_thermal_isotropic,
+    "MAT_GAS_MIXTURE": h_mat_gas_mixture,
     "ICFD_BOUNDARY_PRESCRIBED_VEL": h_icfd_prescribed_vel,
     "ICFD_BOUNDARY_PRESCRIBED_PRE": h_icfd_prescribed_pre,
     "ICFD_BOUNDARY_PRESCRIBED_TEMP": h_icfd_prescribed_temp,

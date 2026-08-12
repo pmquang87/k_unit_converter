@@ -1662,3 +1662,73 @@ class ThermalBoundaryTests(unittest.TestCase):
         # the curve is a pure multiplier: abscissa is a time, ordinate is not
         self.assertAlmostEqual(float(lines[j + 3][0:20]), 1000.0)
         self.assertAlmostEqual(float(lines[j + 3][20:40]), 1.0)
+
+
+class GasMixtureTests(unittest.TestCase):
+    """ALE gas-mixture keywords (R16 Vol I p.28-40, p.41-52; Vol II
+    p.2-1018), kg-m-s -> ton-mm-s."""
+
+    def _conv(self, deck, **kw):
+        p = _write(deck)
+        out = p + ".o.k"
+        ctx = convert(p, SI, TON, out, self_check=False, **kw)
+        return _lines(out), ctx
+
+    def test_mat_gas_mixture_per_mass_branch(self):
+        deck = ("*KEYWORD\n*MAT_GAS_MIXTURE\n" + F(1, 0, 0.0, 0) + "\n"
+                + F(700.0, 700.0, 0, 0, 0, 0, 0, 0) + "\n"
+                + F(1000.0, 1000.0, 0, 0, 0, 0, 0, 0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*MAT_GAS_MIXTURE")
+        self.assertAlmostEqual(float(lines[i + 2][0:10]), 7e8)    # CVMASS
+        self.assertAlmostEqual(float(lines[i + 3][0:10]), 1e9)    # CPMASS
+        self.assertAlmostEqual(float(lines[i + 3][10:20]), 1e9)
+
+    def test_mat_gas_mixture_per_mole_branch(self):
+        # RUNIV != 0 turns the same columns into MOLWT / CPMOLE / B / C
+        deck = ("*KEYWORD\n*MAT_GAS_MIXTURE\n" + F(1, 0, 8.31447, 0) + "\n"
+                + F(0.0288479, 0, 0, 0, 0, 0, 0, 0) + "\n"
+                + F(29.1, 0, 0, 0, 0, 0, 0, 0) + "\n"
+                + F(0.002, 0, 0, 0, 0, 0, 0, 0) + "\n"
+                + F(1e-6, 0, 0, 0, 0, 0, 0, 0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*MAT_GAS_MIXTURE")
+        # ENERGY scales x1000 here (mass /1000, length^2 x1e6, time^2 x1),
+        # so the SI universal gas constant becomes the ton-mm-s 8314.47
+        self.assertAlmostEqual(float(lines[i + 1][20:30]) / 8314.47, 1.0)
+        self.assertAlmostEqual(float(lines[i + 2][0:10]),
+                               0.0288479 * 1e-3)              # MOLWT: MASS
+        self.assertAlmostEqual(float(lines[i + 3][0:10]) / 29100.0, 1.0)
+        self.assertAlmostEqual(float(lines[i + 4][0:10]) / 2.0, 1.0)
+        self.assertEqual(ctx.warnings, [])
+
+    def test_initial_gas_mixture(self):
+        deck = ("*KEYWORD\n*INITIAL_GAS_MIXTURE\n" + F(1, 1, 1, 300.0) + "\n"
+                + F(0.0, 1.0, 0, 0, 0, 0, 0, 0) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*INITIAL_GAS_MIXTURE")
+        self.assertAlmostEqual(float(lines[i + 1][30:40]), 300.0)   # TEMP
+        self.assertAlmostEqual(float(lines[i + 2][10:20]), 1e-12)   # RO2
+
+    def test_section_point_source_mixture(self):
+        deck = ("*KEYWORD\n*SECTION_POINT_SOURCE_MIXTURE\n"
+                + F(2, 100, 0, 101, 0, 0, 0, 0) + "\n"
+                + F(102, 0, 0, 0, 0, 0, 0, 0) + "\n"
+                + F(10000, 1, 1.0) + "\n"
+                + F(10001, 1, 2.0) + "\n"
+                "*DEFINE_CURVE\n" + F(100, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("0.0", w=20) + F("600.0", w=20) + "\n"
+                "*DEFINE_CURVE\n" + F(101, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("0.0", w=20) + F("100.0", w=20) + "\n"
+                "*DEFINE_CURVE\n" + F(102, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("0.0", w=20) + F("1.0", w=20) + "\n*END\n")
+        lines, ctx = self._conv(deck)
+        i = lines.index("*SECTION_POINT_SOURCE_MIXTURE")
+        self.assertAlmostEqual(float(lines[i + 3][20:30]), 1e6)   # ORIFA
+        self.assertAlmostEqual(float(lines[i + 4][20:30]), 2e6)   # repeats
+        j = lines.index(F(100, 0, 1.0, 1.0, 0.0, 0.0, 0, 0))
+        self.assertAlmostEqual(float(lines[j + 1][20:40]), 600.0)  # T stays
+        j = lines.index(F(101, 0, 1.0, 1.0, 0.0, 0.0, 0, 0))
+        self.assertAlmostEqual(float(lines[j + 1][20:40]), 1e5)    # velocity
+        j = lines.index(F(102, 0, 1.0, 1.0, 0.0, 0.0, 0, 0))
+        self.assertAlmostEqual(float(lines[j + 1][20:40]), 1e-3)   # mass rate
