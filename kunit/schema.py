@@ -71,7 +71,19 @@ SPECS: Dict[str, Spec] = {
         C({}, (8, 8, 8)),
         C({0: INERTIA, 1: INERTIA, 2: INERTIA, 3: INERTIA, 4: INERTIA,
            5: INERTIA, 6: MASS}, (10,) * 7)]),
+    # R16 Vol I p.19-99 (*ELEMENT_SHELL): the "Thickness Card" is the
+    # additional card for the THICKNESS, BETA *and* MCID options alike, and
+    # always carries THIC1-THIC4 (nodal thicknesses, 4 x 16 chars) before the
+    # 5th field (BETA angle in degrees / MCID material-system id).  So the
+    # BETA and MCID spellings hold four LENGTH fields too and must not be
+    # whitelisted - they share the THICKNESS layout.
     "ELEMENT_SHELL_THICKNESS": Spec(group=[
+        C({}, (8,) * 10),
+        C({0: LENGTH, 1: LENGTH, 2: LENGTH, 3: LENGTH}, (16,) * 5)]),
+    "ELEMENT_SHELL_BETA": Spec(group=[
+        C({}, (8,) * 10),
+        C({0: LENGTH, 1: LENGTH, 2: LENGTH, 3: LENGTH}, (16,) * 5)]),
+    "ELEMENT_SHELL_MCID": Spec(group=[
         C({}, (8,) * 10),
         C({0: LENGTH, 1: LENGTH, 2: LENGTH, 3: LENGTH}, (16,) * 5)]),
     "ELEMENT_DISCRETE": Spec(repeat=C({7: LENGTH}, (8, 8, 8, 8, 8, 16, 8, 16))),
@@ -432,7 +444,7 @@ _MAT_ALIASES = {
 # keywords that carry no dimensional data at all
 WHITELIST = {
     "KEYWORD", "TITLE", "END", "COMMENT",
-    "ELEMENT_SHELL", "ELEMENT_SHELL_BETA", "ELEMENT_SOLID",
+    "ELEMENT_SHELL", "ELEMENT_SOLID",
     "ELEMENT_SOLID_ORTHO", "ELEMENT_BEAM",
     "CONTROL_ENERGY", "CONTROL_OUTPUT", "CONTROL_ACCURACY", "CONTROL_SHELL",
     "CONTROL_SOLID", "CONTROL_HOURGLASS", "CONTROL_BULK_VISCOSITY",
@@ -555,8 +567,11 @@ def h_define_curve(block: Block, ctx, edit: bool) -> None:
                      "ordinates left at zero.")
             xdim, ydim = next(iter(xdims)), DIMLESS
         else:
+            # sort by str(): a TEMP ordinate is the sentinel string "TEMP",
+            # which cannot be ordered against a Dim tuple.
+            demands = sorted(dims.items(), key=str)
             ctx.error(f"*{block.name} lcid={lcid}: conflicting dimension "
-                      f"demands from referencers: {sorted(dims.items())} - "
+                      f"demands from referencers: {demands} - "
                       f"resolve with --curve {lcid}=<xdim>:<ydim>")
             return
     else:
