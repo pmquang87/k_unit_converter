@@ -1577,16 +1577,91 @@ class RandomFatigueTests(unittest.TestCase):
         self.assertAlmostEqual(
             float(lines[j + 1][20:40]) / psi_mpa ** 2, 1.0, places=6)
 
-    def test_freq_rv_wave_vaflag_refused(self):
-        deck = ("*KEYWORD\n*FREQUENCY_DOMAIN_RANDOM_VIBRATION\n"
-                + F(1, 10, 0.0, 100.0, 0) + "\n"
-                + F(0.02, 0, 0, 0.0, 0.0, 0) + "\n"
-                + F(5, 1, 0, 0.0, 0, 0, 1, 0) + "\n"           # VAFLAG=5
-                + F(0, 0, 0, 0.0, "", 0, 0, 0.1) + "\n"
-                + F(0, 2, 2, 11, 0, 0, 0, 0) + "\n*END\n")
+    # VAFLAG 5/6/7 load a panel with an acoustic pressure and add three
+    # frequency-abscissa curves on Card 5: LDVEL is the phase velocity,
+    # LDFLW/LDSPN the flow-wise and span-wise exponential-decay LENGTHS.
+    # The values are the LSTC TBL example's curves 2001-2004 at 31.5 Hz
+    # (dynaexamples 6.4, slinch-in-s).
+    def _rv_tbl(self, pref_card="", vaflag=7):
+        return ("*KEYWORD\n*FREQUENCY_DOMAIN_RANDOM_VIBRATION\n"
+                + F(1, 10, 0.0, 10000.0, 0) + "\n"
+                + F(0.01, 0, 0, 0.0, 0.0, 0) + "\n"
+                + F(vaflag, 0, 0, 0.0, 0, 0, 1, 0) + "\n"
+                + pref_card
+                + F(0, 8, 8, 0.0, "", 0, 0, 0.1) + "\n"
+                + F(1, 2, 0, 2001, 2002, 2003, 2004, 0) + "\n"
+                "*DEFINE_CURVE\n" + F(2001, 0, 1.0, 1.0, 0.0, 0.0, 0) + "\n"
+                + F("31.5", w=20) + F("0.007049", w=20) + "\n"
+                "*DEFINE_CURVE\n" + F(2002, 0, 1.0, 1.0, 0.0, 0.0, 0) + "\n"
+                + F("31.5", w=20) + F("3497.0", w=20) + "\n"
+                "*DEFINE_CURVE\n" + F(2003, 0, 1.0, 1.0, 0.0, 0.0, 0) + "\n"
+                + F("31.5", w=20) + F("2.613", w=20) + "\n"
+                "*DEFINE_CURVE\n" + F(2004, 0, 1.0, 1.0, 0.0, 0.0, 0) + "\n"
+                + F("31.5", w=20) + F("0.3885", w=20) + "\n*END\n")
+
+    def _conv_tbl(self, deck):
+        SLIN = parse_system("slinch-in-s")
         p = _write(deck)
-        with self.assertRaisesRegex(ConvertError, "VAFLAG=5"):
-            convert(p, KGMM, TON, p + ".o.k", self_check=False)
+        out = p + ".o.k"
+        ctx = convert(p, SLIN, TON, out, self_check=False)
+        return _lines(out), ctx
+
+    def test_freq_rv_tbl_wave_curves(self):
+        lines, ctx = self._conv_tbl(self._rv_tbl())
+        psi_mpa = (0.45359237 * 9.80665 / 0.0254 / 1000.0) / 25.4
+        cs = [i for i, l in enumerate(lines) if l == "*DEFINE_CURVE"]
+        for i in cs:                        # every abscissa is a frequency
+            self.assertAlmostEqual(float(lines[i + 2][0:20]), 31.5)
+        # LDPSD: pressure PSD, psi^2/Hz -> MPa^2/Hz
+        self.assertAlmostEqual(
+            float(lines[cs[0] + 2][20:40]) / (0.007049 * psi_mpa ** 2), 1.0,
+            places=6)
+        # LDVEL: phase velocity, in/s -> mm/s
+        self.assertAlmostEqual(float(lines[cs[1] + 2][20:40]), 3497.0 * 25.4)
+        # LDFLW / LDSPN: decay lengths, in -> mm
+        self.assertAlmostEqual(float(lines[cs[2] + 2][20:40]), 2.613 * 25.4)
+        self.assertAlmostEqual(float(lines[cs[3] + 2][20:40]), 0.3885 * 25.4,
+                               places=6)
+        self.assertFalse(any("unreferenced" in w for w in ctx.warnings),
+                         ctx.warnings)
+
+    def test_freq_rv_wave_without_pref_card_warns_about_db_scale(self):
+        # PREF only sets the dB reference, so the response is exact and the
+        # SPL scale is not - psi -> MPa moves it by 20*log10(1/145) dB.
+        _, ctx = self._conv_tbl(self._rv_tbl())
+        w = [x for x in ctx.warnings if "PREF" in x]
+        self.assertEqual(len(w), 1, ctx.warnings)
+        self.assertIn("-43.2 dB", w[0])
+        self.assertIn("1.37895E-07", w[0])
+
+    def test_freq_rv_wave_pref_card_is_a_pressure(self):
+        # Card 3.1 is optional, so its presence is read off the card count.
+        deck = self._rv_tbl(pref_card=F(2.9e-9) + "\n", vaflag=5)
+        lines, ctx = self._conv_tbl(deck)
+        i = lines.index("*FREQUENCY_DOMAIN_RANDOM_VIBRATION")
+        psi_mpa = (0.45359237 * 9.80665 / 0.0254 / 1000.0) / 25.4
+        self.assertAlmostEqual(float(lines[i + 4][0:10]) / (2.9e-9 * psi_mpa),
+                               1.0, places=4)   # 10-char field, 5 digits
+        self.assertEqual(int(lines[i + 5][10:20]), 8)          # Card 4 IPANELU
+        self.assertEqual(int(lines[i + 6][30:40]), 2001)       # Card 5 LDPSD
+        self.assertFalse(any("PREF" in x for x in ctx.warnings), ctx.warnings)
+
+    def test_freq_rv_wave_card_count_refused(self):
+        # one card too many: neither the with-PREF nor the without-PREF
+        # reading fits, so the block must be refused rather than guessed at
+        deck = self._rv_tbl(pref_card=F(2.9e-9) + "\n" + F(0.0) + "\n")
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "Card 3.1"):
+            convert(p, parse_system("slinch-in-s"), TON, p + ".o.k",
+                    self_check=False)
+
+    def test_freq_rv_spl_load_type_refused(self):
+        deck = self._rv_tbl().replace(F(0, 8, 8, 0.0, "", 0, 0, 0.1),
+                                      F(1, 8, 8, 0.0, "", 0, 0, 0.1))
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "LDTYP=1"):
+            convert(p, parse_system("slinch-in-s"), TON, p + ".o.k",
+                    self_check=False)
 
     def test_freq_rv_legacy_nftg_refused(self):
         deck = self.RV_LEGACY.replace(

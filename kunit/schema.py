@@ -12,6 +12,7 @@ All field->dimension maps are verified against the LS-DYNA R16 manuals.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field as dfield
 from decimal import Decimal
 from fractions import Fraction
@@ -3637,6 +3638,12 @@ _RV_BASE_DIM: Dict[int, Optional[Dim]] = {
     0: None,                        # no random vibration analysis
     1: ACCEL, 11: ACCEL,            # base / enforced acceleration
     2: PRESSURE, 3: PRESSURE,       # random pressure / plane wave
+    # progressive / reverberant / turbulent-boundary-layer wave: an acoustic
+    # pressure on a panel.  PREF is the "reference pressure used to convert
+    # acoustic pressure to SPL (dB) ... only needed if VAFLAG = 5, 6, or 7"
+    # (p.23-67) and SID is the "set ID for the panel exposed to acoustic
+    # environment" (p.23-69).
+    5: PRESSURE, 6: PRESSURE, 7: PRESSURE,
     8: FORCE,                       # nodal force
     9: VELOCITY, 12: VELOCITY,      # base / enforced velocity
     10: LENGTH, 13: LENGTH,         # base / enforced displacement
@@ -3688,9 +3695,38 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
     dimension; only the flag is rewritten.  UNIT = -1 keeps its own UMLT
     multiplier, which is a genuine acceleration and converts.
 
-    VAFLAG 5-7 read LDFLW/LDSPN, whose ordinate the manual never defines, and
-    VAFLAG 4 is not modelled; LDTYP=1 (SPL in dB) references an SI-flavoured
-    default PREF - all refused."""
+    VAFLAG 5, 6 and 7 (progressive / reverberant / turbulent-boundary-layer
+    wave) load a panel with an acoustic PRESSURE, so LDPSD is a pressure PSD
+    exactly as for VAFLAG 2 and 3.  They add the optional Card 3.1 PREF, a
+    plain pressure, and read three more curves on Card 5.  All four share
+    LDPSD's frequency abscissa - Remark 8 (p.23-76) requires LDPSD, LDVEL,
+    LDFLW and LDSPN to "all be defined using the same number of points":
+        LDVEL   "load curve for phase velocity" (p.23-70): a VELOCITY.
+        LDFLW   "load curve for exponential decay for TBL in flow-wise
+        LDSPN    / span-wise direction" (p.23-70): LENGTHs.
+
+    No LS-DYNA manual (Vol I-III or theory, R11 through R17) states the decay
+    equation, so LDFLW/LDSPN were pinned from the LSTC example decks that use
+    them - curves 2001-2004 of dynaexamples.com example 6.4/6.5 ("6.4.tbl.-
+    psd.k", slinch-in-s, 19 one-third-octave points each).  Read as the
+    streamwise and lateral correlation lengths of the Efimtsov turbulent-
+    boundary-layer model,
+        G(xi, eta, w) = P(w) exp(-|xi| / L1) exp(-|eta| / L3) exp(-i w xi/Uc)
+        L / d = [(a w d / Uc)^2 + b^2 / (Sh^2 + (b/c)^2)]^(-1/2),  Sh = w d/ut
+    the deck's (LDVEL, LDFLW, LDSPN) triple is reproduced to 0.02 % RMS by a
+    single boundary layer, d = 4.26 in and ut = 339 in/s (ut/Uc = 0.043), on
+    which the fitted flow-wise and span-wise decay constants come out at
+    a = 0.1000 and 0.7710 against Efimtsov's published 0.10 and 0.77.  That
+    only balances dimensionally if LDFLW/LDSPN are lengths in model length
+    units and LDVEL is a velocity in model velocity units.  Reading them
+    instead as dimensionless decay coefficients, or as 1/length decay rates,
+    fits the same model at 89 % and 72 % RMS and demands ut = 500 m/s -
+    faster than the convection velocity it is a small fraction of.  Either
+    also makes the flow-wise decay 7.6x FASTER than the span-wise one, which
+    is backwards for every TBL model: eddies stay coherent along the flow.
+
+    VAFLAG 4 is not modelled; LDTYP=1 (SPL in dB) rides on a reference
+    pressure that only VAFLAG 5-7 can state - both refused."""
     kf = ctx.kf
     data = list(block.data)
     fatigue = "FATIGUE" in block.name.split("_")
@@ -3698,7 +3734,7 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
         ctx.error(f"*{block.name}: expected at least Cards 1-4, found "
                   f"{len(data)} data card(s).")
         return
-    c1, c2, c3, c4 = data[:4]
+    c1, c2, c3 = data[:3]
 
     def num(li, fi):
         return kf.get_number(li, STD8, block.long, fi)
@@ -3711,20 +3747,7 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
     napsd_raw = _numint(kf, c3, STD8, block.long, 6)
     napsd = 1 if napsd_raw is None else max(napsd_raw, 0)  # default 1
     f7 = _numint(kf, c3, STD8, block.long, 7)              # NCPSD | legacy NFTG
-    ldtyp = iv(c4, 0)
 
-    if vaflag in (5, 6, 7):
-        ctx.error(f"*{block.name}: VAFLAG={vaflag} (progressive/reverberant/"
-                  "turbulent-boundary-layer wave loading) reads LDFLW and "
-                  "LDSPN on Card 5, and R16 Vol I p.23-70 documents them only "
-                  "as 'load curve for exponential decay for TBL in flow-wise "
-                  "/ span-wise direction'. The decay equation appears nowhere "
-                  "in Vol I-III or the theory manual, so the ordinate could "
-                  "be a length, a 1/length or a pure number - convert "
-                  "manually. (Card 3.1 PREF, which these VAFLAGs also add, is "
-                  "a plain pressure and its presence is decidable from the "
-                  "card count; it is not what blocks the conversion.)")
-        return
     if vaflag == 4:
         ctx.error(f"*{block.name}: VAFLAG=4 (shock wave loading) is not "
                   "modelled - convert manually.")
@@ -3738,11 +3761,68 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
                   "(-1, 0, 1-4 - R16 Vol I p.23-66..67) - refusing to guess "
                   "what unit system the acceleration input declares.")
         return
+
+    # ── Card 3.1: PREF ───────────────────────────────────────────────────
+    # "This card is read for VAFLAG = 5, 6 and 7.  This card is optional."
+    # (p.23-63/23-67).  Optional means nothing in the card itself announces
+    # it - but it shifts every following card by exactly one, so the two
+    # hypotheses imply card counts that differ by one and at most one of them
+    # can match what the block actually holds.  That makes its presence
+    # decidable from the card count rather than guessed.
+    wave = vaflag in (5, 6, 7)
+
+    def expected_cards(p: int) -> Optional[int]:
+        """Data-card count implied by the flags, given `p` Card 3.1 lines.
+
+        Mirrors the card-count plan below.  Should the two ever disagree the
+        plan's own check refuses the block, so drift costs a conversion, not
+        a deck.
+        """
+        if 3 + p >= len(data):
+            return None
+        n = 4 + p + napsd
+        if fatigue and (any(num(c1, fi) for fi in (5, 6, 7))
+                        or (f7 or 0) < 0 or bool(num(data[3 + p], 4))):
+            return n                                   # legacy R8/R10 layout
+        ncp = f7 or 0
+        if ncp < 0:
+            return None
+        n += ncp
+        if fatigue:
+            if len(data) <= n:
+                return None
+            c7l = data[n]
+            nraw = _numint(kf, c7l, STD8, block.long, 1)
+            nftg = 1 if nraw is None else nraw         # default 1
+            inftg = max(_numint(kf, c7l, STD8, block.long, 5) or 0, 0)
+            n += 1 + (max(nftg, 0) if nftg != -999 else 0) + inftg
+        return n
+
+    pref = 0
+    if wave:
+        fits = [p for p in (0, 1) if expected_cards(p) == len(data)]
+        if len(fits) != 1:
+            ctx.error(f"*{block.name}: VAFLAG={vaflag} reads Card 3.1 (PREF), "
+                      "which is optional (R16 Vol I p.23-63/23-67), so only "
+                      "the card count says whether it is there: the block "
+                      f"holds {len(data)} data cards while the flags imply "
+                      f"{expected_cards(0)} without it and {expected_cards(1)} "
+                      "with it. The layout was not understood, refusing to "
+                      "guess.")
+            return
+        pref = fits[0]
+    c4 = data[3 + pref]
+    ldtyp = iv(c4, 0)
+
     if ldtyp == 1:
-        ctx.error(f"*{block.name}: LDTYP=1 (SPL input in dB) depends on a "
-                  "reference pressure with an SI-flavoured default "
-                  "(2.0E-5, Card 3.1 p.23-67) - not modelled, convert "
-                  "manually.")
+        ctx.error(f"*{block.name}: LDTYP=1 (SPL input in dB) makes the "
+                  "excitation a level referred to PREF, and it is documented "
+                  "'for plane wave only' (VAFLAG=3, p.23-68) - the one "
+                  "loading type that never reads Card 3.1, so PREF is the "
+                  "hard-coded 2.0E-5 default (p.23-67), a bare number that "
+                  "means a different pressure in every unit system. The dB "
+                  "ordinate cannot be made unit-consistent - convert "
+                  "manually, or restate the load as a PSD (LDTYP=0).")
         return
     if ldtyp not in (0, 2):
         ctx.error(f"*{block.name}: LDTYP={ldtyp} is not documented "
@@ -3771,7 +3851,7 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
         base, psd = DIMLESS, TIME
 
     # ── card-count plan ──────────────────────────────────────────────────
-    load_cards = data[4:4 + napsd]
+    load_cards = data[4 + pref:4 + pref + napsd]
     if legacy:
         nftg = f7 or 0
         if nftg != -999:
@@ -3787,7 +3867,7 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
                       "cards whose legacy layout cannot be verified - "
                       "convert manually.")
             return
-        expected = 4 + napsd
+        expected = 4 + pref + napsd
         cross_cards, c7, sn_cards = [], None, []
     else:
         ncpsd = f7 or 0
@@ -3795,8 +3875,8 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
             ctx.error(f"*{block.name}: NCPSD={ncpsd} is invalid (cross-PSD "
                       "count cannot be negative).")
             return
-        cross_cards = data[4 + napsd:4 + napsd + ncpsd]
-        expected = 4 + napsd + ncpsd
+        cross_cards = data[4 + pref + napsd:4 + pref + napsd + ncpsd]
+        expected = 4 + pref + napsd + ncpsd
         c7, sn_cards = None, []
         if fatigue:
             if len(data) <= expected:
@@ -3839,9 +3919,21 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
                 else:                                      # LDTYP=2: history
                     ctx.scan.register_curve(ldpsd, TIME, base,
                                        block.name + " LDPSD (time history)")
-            for fi, fname in ((4, "LDVEL"), (5, "LDFLW"), (6, "LDSPN")):
+            # LDVEL / LDFLW / LDSPN: read only for the partially correlated
+            # waves.  All three share LDPSD's frequency abscissa (Remark 8,
+            # p.23-76).  LDVEL is the phase velocity; LDFLW and LDSPN are the
+            # flow-wise and span-wise exponential-decay lengths (see the
+            # docstring for how the lengths were pinned).
+            for fi, fname, fdim in ((4, "LDVEL", VELOCITY),
+                                    (5, "LDFLW", LENGTH),
+                                    (6, "LDSPN", LENGTH)):
                 sub = _numint(kf, li, STD8, block.long, fi)
-                if sub:
+                if not sub:
+                    continue
+                if wave:
+                    ctx.scan.register_curve(sub, FREQ, fdim,
+                                            f"{block.name} {fname}")
+                else:
                     ctx.warn(f"*{block.name}: {fname}={sub} is only read "
                              "for wave loading (VAFLAG=5..7) and is ignored "
                              f"for VAFLAG={vaflag} - curve left unresolved.")
@@ -3894,6 +3986,24 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
         w = 20 if block.long else 10
         kf.set_field(c3, STD8, block.long, 2, str(new_unit).rjust(w))
         ctx.count(block.name + f" (UNIT->{new_unit})")
+    if pref:
+        # Card 3.1 PREF: "reference pressure used to convert acoustic
+        # pressure to SPL (dB)" (p.23-67) - a plain pressure.
+        kf.scale_field(data[3], STD8, block.long, 0, ctx.fac(PRESSURE))
+    elif wave:
+        # Without Card 3.1 LS-DYNA falls back to a literal 2.0E-5 (p.23-67),
+        # a bare number carried in whatever the model's pressure unit is.
+        # Nothing in the deck holds it, so the conversion cannot move it: the
+        # SPL scale silently shifts while the structural response - which
+        # never sees PREF - stays exact.
+        f = float(ctx.fac(PRESSURE))
+        ctx.warn(f"*{block.name}: VAFLAG={vaflag} but Card 3.1 is absent, so "
+                 "LS-DYNA uses its built-in PREF = 2.0E-5 (R16 Vol I "
+                 "p.23-67) - a bare number in model pressure units that this "
+                 "conversion cannot reach. The random-vibration response is "
+                 "unaffected (PREF only sets the dB reference), but SPL "
+                 f"output shifts by {20.0 * math.log10(f):+.1f} dB. Add Card "
+                 f"3.1 with PREF = {2.0e-5 * f:.5E} to keep the dB scale.")
     for fi in (2, 3):                                      # FNMIN FNMAX
         kf.scale_field(c1, STD8, block.long, fi, ctx.fac(FREQ))
     kf.scale_field(c2, STD8, block.long, 3, ctx.fac(FREQ))  # DMPMAS (alpha)
