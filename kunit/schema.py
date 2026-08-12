@@ -204,6 +204,18 @@ SPECS: Dict[str, Spec] = {
         C({1: DENSITY, 2: PRESSURE, 4: PRESSURE, 6: RATE}),
         C()],
         probe={"ro": (0, 1), "e": (0, 2)}),
+    # R16 Vol II p.2-241..2-244 (*MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY /
+    # MAT_123): Card1 MID RO E PR SIGY ETAN FAIL TDEL is field-for-field the
+    # MAT_024 layout (E/SIGY/ETAN stresses, FAIL a failure plastic strain,
+    # TDEL a minimum deletion time step); Card2 C P LCSS LCSR VP EPSTHIN
+    # EPSMAJ NUMINT (C the Cowper-Symonds strain-rate coefficient); Cards 3/4
+    # the EPS/ES stress-strain points.  LCSS/LCSR are registered by h_mat_024.
+    "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY": Spec(cards=[
+        C({1: DENSITY, 2: PRESSURE, 4: PRESSURE, 5: PRESSURE, 7: TIME}),
+        C({0: RATE}),
+        C(),
+        C({i: PRESSURE for i in range(8)})],
+        probe={"ro": (0, 1), "e": (0, 2)}),
     # R16 Vol II p.2-245..2-250 (*MAT_COMPOSITE_DAMAGE / MAT_022):
     # Card1 MID RO EA EB EC PRBA PRCA PRCB; Card2 GAB GBC GCA KFAIL AOPT
     # MACF ATRACK; Card3 XP YP ZP A1 A2 A3; Card4 V1 V2 V3 D1 D2 D3 BETA;
@@ -1177,7 +1189,7 @@ def h_contact(block: Block, ctx, edit: bool) -> None:
     if mortar and len(data) > mpp_off + 2:
         sfsa = kf.get_number(data[mpp_off + 2], STD8, block.long, 0)
         if sfsa is not None and sfsa < 0 and not edit:
-            ctx.register_curve(int(-sfsa), LENGTH, PRESSURE,
+            ctx.scan.register_curve(int(-sfsa), LENGTH, PRESSURE,
                                block.name + " Mortar p(penetration)")
     if drawbead and len(data) > mpp_off + 3:
         # R16 Vol I p.11-53: LCIDRF LCIDNF DBDTH DFSCL NUMINT DBPID ELOFF
@@ -1202,7 +1214,7 @@ def h_contact(block: Block, ctx, edit: bool) -> None:
             for fi in (0, 1):                            # LCIDRF LCIDNF
                 lc = _numint(kf, db, STD8, block.long, fi)
                 if lc:
-                    ctx.register_curve(lc, LENGTH, STIFF,
+                    ctx.scan.register_curve(lc, LENGTH, STIFF,
                                        block.name + " force/length(depth)")
     if not edit:
         return
@@ -1423,33 +1435,33 @@ def h_airbag_simple(block: Block, ctx, edit: bool) -> None:
         if pv:
             cn = kf.get_number(c3, STD8, block.long, 0)
             if cn is not None and cn < 0:
-                ctx.register_curve(int(-cn), TIME, PRESSURE,
+                ctx.scan.register_curve(int(-cn), TIME, PRESSURE,
                                    block.name + " CN(time)")
             lcid = _numint(kf, c3, STD8, block.long, 2)
             if lcid:                       # pressure vs RELATIVE volume
-                ctx.register_curve(lcid, DIMLESS, PRESSURE,
+                ctx.scan.register_curve(lcid, DIMLESS, PRESSURE,
                                    block.name + " p(relative volume)")
             lciddr = _numint(kf, c3, STD8, block.long, 3)
             if lciddr:
-                ctx.register_curve(lciddr, TIME, PRESSURE,
+                ctx.scan.register_curve(lciddr, TIME, PRESSURE,
                                    block.name + " CN(time), relaxation")
             return
         lcid = _numint(kf, c3, STD8, block.long, 3)
         if lcid:                    # mass flow rate in, (1,0,-1) = DAMP
-            ctx.register_curve(lcid, TIME, DAMP,
+            ctx.scan.register_curve(lcid, TIME, DAMP,
                                block.name + " mass flow rate in(time)")
         mu = kf.get_number(c3, STD8, block.long, 4)
         if mu is not None and mu < 0:
-            ctx.register_curve(int(-mu), PRESSURE, DIMLESS,
+            ctx.scan.register_curve(int(-mu), PRESSURE, DIMLESS,
                                block.name + " shape factor(pressure)")
         area = kf.get_number(c3, STD8, block.long, 5)
         if area is not None and area < 0:
-            ctx.register_curve(int(-area), PRESSURE, AREA,
+            ctx.scan.register_curve(int(-area), PRESSURE, AREA,
                                block.name + " exit area(pressure)")
         if idx + 1 < len(data):
             lou = _numint(kf, data[idx + 1], STD8, block.long, 0)
             if lou:
-                ctx.register_curve(lou, PRESSURE, DAMP,
+                ctx.scan.register_curve(lou, PRESSURE, DAMP,
                                    block.name + " mass flow rate out(p)")
         return
 
@@ -1507,7 +1519,7 @@ def h_boundary_temperature(block: Block, ctx, edit: bool) -> None:
         lcid = _numint(kf, li, STD8, block.long, 1)
         if not edit:
             if lcid:
-                ctx.register_curve(lcid, TIME, TEMP,
+                ctx.scan.register_curve(lcid, TIME, TEMP,
                                    block.name + " temperature(time)")
         else:
             kf.scale_field(li, STD8, block.long, 4, ctx.fac(TIME))  # TDEATH
@@ -1546,13 +1558,13 @@ def _thermal_coef_pair(block: Block, ctx, edit: bool, li: int,
     tlcid = _numint(kf, li, STD8, block.long, 2) or 0
     if not edit:
         if xlcid > 0:
-            ctx.register_curve(xlcid, TIME, HEAT_FLUX,
+            ctx.scan.register_curve(xlcid, TIME, HEAT_FLUX,
                                f"{block.name} {what}(time)")
         elif xlcid < 0:
-            ctx.register_curve(-xlcid, TEMP, HEAT_FLUX,
+            ctx.scan.register_curve(-xlcid, TEMP, HEAT_FLUX,
                                f"{block.name} {what}(temperature)")
         if tlcid > 0:
-            ctx.register_curve(tlcid, TIME, TEMP,
+            ctx.scan.register_curve(tlcid, TIME, TEMP,
                                block.name + " temperature(time)")
         return
     if xlcid == 0:
@@ -1625,7 +1637,7 @@ def h_load_thermal_variable_node(block: Block, ctx, edit: bool) -> None:
         if not edit:
             lcid = _numint(kf, li, STD8, block.long, 3)
             if lcid:
-                ctx.register_curve(lcid, TIME, DIMLESS,
+                ctx.scan.register_curve(lcid, TIME, DIMLESS,
                                    block.name + " multiplier(time)")
         elif any(kf.get_number(li, STD8, block.long, fi) for fi in (1, 2)):
             ctx.note(f"*{block.name}: temperature field left unchanged "
@@ -1657,7 +1669,7 @@ def h_initial_axial_force_beam(block: Block, ctx, edit: bool) -> None:
     for li in block.data:
         lcid = _numint(kf, li, STD8, block.long, 1)
         if lcid:
-            ctx.register_curve(lcid, TIME, FORCE,
+            ctx.scan.register_curve(lcid, TIME, FORCE,
                                block.name + " preload force(time)")
 
 
@@ -1674,7 +1686,7 @@ def h_load_thermal_load_curve(block: Block, ctx, edit: bool) -> None:
             for fi in (0, 1):                                 # LCID LCIDDR
                 lcid = _numint(kf, li, STD8, block.long, fi)
                 if lcid:
-                    ctx.register_curve(lcid, TIME, TEMP,
+                    ctx.scan.register_curve(lcid, TIME, TEMP,
                                        block.name + " temperature(time)")
         return
     ctx.count(block.name + " (curve-carried)")
@@ -1702,7 +1714,7 @@ def h_load_thermal_variable(block: Block, ctx, edit: bool) -> None:
             for fi in (2, 5, 6, 7):            # LCID LCIDE LCIDR LCIDEDR
                 lcid = _numint(kf, li, STD8, block.long, fi)
                 if lcid:
-                    ctx.register_curve(lcid, TIME, TEMP,
+                    ctx.scan.register_curve(lcid, TIME, TEMP,
                                        block.name + " temperature(time)")
         elif any(kf.get_number(li, STD8, block.long, fi)
                  for fi in (0, 1, 3, 4)):      # TS TB TSE TBE
@@ -1783,7 +1795,7 @@ def h_rigidwall_geometric(block: Block, ctx, edit: bool) -> None:
                               "documented (0 = velocity, 1 = displacement, "
                               "R16 Vol I p.40-13).")
                     return
-                ctx.register_curve(lcid, TIME, ydim, block.name + " motion")
+                ctx.scan.register_curve(lcid, TIME, ydim, block.name + " motion")
         if not edit:
             continue
         for ci, dims in enumerate(seq):
@@ -1824,7 +1836,7 @@ def h_mat_frazer_nash(block: Block, ctx, edit: bool) -> None:
     lcid = _numint(kf, data[2], STD8, block.long, 3) or 0
     if not edit:
         if lcid:
-            ctx.register_curve(lcid, LENGTH, FORCE,
+            ctx.scan.register_curve(lcid, LENGTH, FORCE,
                                block.name + " force(gauge-length change)")
         return
     kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(DENSITY))    # RO
@@ -1876,7 +1888,7 @@ def h_mat_inv_hyperbolic_sin(block: Block, ctx, edit: bool) -> None:
         if lcq:
             # LCQ > 0: Q vs plastic strain; LCQ < 0: Q vs temperature.  Both
             # axes stay unscaled under the Q-unchanged convention.
-            ctx.register_curve(abs(lcq), DIMLESS, DIMLESS,
+            ctx.scan.register_curve(abs(lcq), DIMLESS, DIMLESS,
                                block.name + " Q curve (left unscaled)")
         return
     kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(DENSITY))        # RO
@@ -1936,7 +1948,7 @@ def h_mat_spotweld(block: Block, ctx, edit: bool) -> None:
         for fi, dim, name in resultants:
             v = kf.get_number(data[1], STD8, block.long, fi)
             if v is not None and v < 0:
-                ctx.register_curve(int(-v), RATE, dim,
+                ctx.scan.register_curve(int(-v), RATE, dim,
                                    f"{block.name} {name}(strain rate)")
         return
     kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(DENSITY))    # RO
@@ -1985,11 +1997,11 @@ def h_mat_thermal_isotropic(block: Block, ctx, edit: bool) -> None:
     tgrlc = _numint(kf, data[0], STD8, block.long, 2) or 0
     if not edit:
         if tgrlc > 0:
-            ctx.register_curve(tgrlc, TIME, PWR_VOL,
+            ctx.scan.register_curve(tgrlc, TIME, PWR_VOL,
                                block.name + " generation rate(time)")
         elif tgrlc < 0:
             # abscissa is a temperature, which kunit never rescales
-            ctx.register_curve(-tgrlc, DIMLESS, PWR_VOL,
+            ctx.scan.register_curve(-tgrlc, DIMLESS, PWR_VOL,
                                block.name + " generation rate(temperature)")
         return
     kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(DENSITY))     # TRO
@@ -2134,7 +2146,7 @@ def h_icfd_conj_heat(block: Block, ctx, edit: bool) -> None:
         if not edit:
             lcid = _numint(kf, li, STD8, block.long, 3)
             if lcid:
-                ctx.register_curve(lcid, TIME, DIMLESS,
+                ctx.scan.register_curve(lcid, TIME, DIMLESS,
                                    block.name + " scale factor(time)")
         elif ctype == 1:
             kf.scale_field(li, STD8, block.long, 2, ctx.fac(HEAT_FLUX))
@@ -2213,15 +2225,15 @@ def h_mat_fabric(block: Block, ctx, edit: bool) -> None:
         ela = kf.get_number(data[2], STD8, block.long, 3)
         tsr = kf.get_number(data[2], STD8, block.long, 7)
         if ela and ela < 0:              # effective leakage area vs time
-            ctx.register_curve(int(-ela), TIME, DIMLESS, block.name + " ELA")
+            ctx.scan.register_curve(int(-ela), TIME, DIMLESS, block.name + " ELA")
         if tsr and (tsr < 0 or tsr >= 1):   # strain-restoration factor vs time
-            ctx.register_curve(int(abs(tsr)), TIME, DIMLESS,
+            ctx.scan.register_curve(int(abs(tsr)), TIME, DIMLESS,
                                block.name + " TSRFAC")
         if len(data) > 5:                # Card 7: stress as a function of strain
             for fi in range(6):
                 lc = _numint(kf, data[5], STD8, block.long, fi)
                 if lc:
-                    ctx.register_curve(abs(lc), DIMLESS, PRESSURE,
+                    ctx.scan.register_curve(abs(lc), DIMLESS, PRESSURE,
                                        block.name + " Card 7")
         return
     for fi in (1, 2, 3):                                       # RO EA EB
@@ -2272,7 +2284,7 @@ def h_mat_enhanced_composite_damage(block: Block, ctx, edit: bool) -> None:
             for fi in range(5):
                 lc = _numint(kf, data[8], STD8, block.long, fi)
                 if lc:
-                    ctx.register_curve(lc, RATE, PRESSURE,
+                    ctx.scan.register_curve(lc, RATE, PRESSURE,
                                        block.name + " strength(strain rate)")
         return
     for fi in (1, 2, 3, 4):                                    # RO EA EB EC
@@ -2344,16 +2356,16 @@ def h_mat_simplified_rubber_foam(block: Block, ctx, edit: bool) -> None:
     lc = _numint(kf, data[1], STD8, block.long, 3)
     if not edit:
         if lc:
-            ctx.register_curve(lc, LENGTH, FORCE,
+            ctx.scan.register_curve(lc, LENGTH, FORCE,
                                block.name + " force(gauge length change)")
             # LC/TBID: the same field names a *DEFINE_TABLE whose own values
             # are strain rates; registering both is harmless because only the
             # matching keyword ever consumes the registration.
-            ctx.register_table(lc, RATE, LENGTH, FORCE)
+            ctx.scan.register_table(lc, RATE, LENGTH, FORCE)
         if len(data) > 2:
             lcu = _numint(kf, data[2], STD8, block.long, 0)
             if lcu:
-                ctx.register_curve(lcu, LENGTH, FORCE,
+                ctx.scan.register_curve(lcu, LENGTH, FORCE,
                                    block.name + " unloading force(length)")
         return
     for fi, dim in ((1, DENSITY), (2, PRESSURE), (4, PRESSURE), (5, PRESSURE)):
@@ -2432,7 +2444,7 @@ def h_mat_057(block: Block, ctx) -> None:
         return
     lcid = _numint(kf, data[0], STD8, block.long, 3)
     if lcid:
-        ctx.register_table(lcid, DIMLESS, DIMLESS, PRESSURE)
+        ctx.scan.register_table(lcid, DIMLESS, DIMLESS, PRESSURE)
 
 
 def h_section_beam(block: Block, ctx, edit: bool) -> None:
@@ -2647,7 +2659,7 @@ def h_define_vector(block: Block, ctx, edit: bool) -> None:
     kf = ctx.kf
     for li in block.data:
         vid = _numint(kf, li, STD8, block.long, 0)
-        if vid in ctx.sale_vel_vectors:
+        if vid in ctx.scan.sale_vel_vectors:
             if any(kf.get_number(li, STD8, block.long, fi)
                    for fi in (4, 5, 6)):
                 ctx.error(f"*{block.name}: vector {vid} is referenced as the "
@@ -2686,7 +2698,7 @@ def h_define_box(block: Block, ctx, edit: bool) -> None:
     if not data:
         return
     boxid = _numint(kf, data[0], STD8, block.long, 0)
-    if boxid in ctx.sale_index_boxes:
+    if boxid in ctx.scan.sale_index_boxes:
         ctx.note(f"*{block.name}: box {boxid} is referenced with "
                  "GEOM=BOXCPT, so its six values are S-ALE control-point "
                  "INDICES, not coordinates (R16 Vol I p.4-126) - left "
@@ -2740,16 +2752,16 @@ def h_ale_structured_fsi(block: Block, ctx, edit: bool) -> None:
     if not edit:
         pfac = kf.get_number(c2, STD8, block.long, 2)
         if pfac is not None and pfac < 0:
-            ctx.register_curve(int(-pfac), LENGTH, PRESSURE,
+            ctx.scan.register_curve(int(-pfac), LENGTH, PRESSURE,
                                block.name + " PFAC p(penetration)")
         fric = kf.get_number(c2, STD8, block.long, 3)
         if fric is not None and fric < 0:
             # table values are coupling pressures, each sub-curve is the
             # friction coefficient versus relative velocity
-            ctx.register_table(int(-fric), PRESSURE, VELOCITY, DIMLESS)
+            ctx.scan.register_table(int(-fric), PRESSURE, VELOCITY, DIMLESS)
         offset = kf.get_number(c2, STD8, block.long, 7)
         if offset is not None and offset < 0:
-            ctx.register_curve(int(-offset), TIME, LENGTH,
+            ctx.scan.register_curve(int(-offset), TIME, LENGTH,
                                block.name + " OFFSET(time)")
         return
     for fi in (0, 1):                                        # START END
@@ -2854,11 +2866,11 @@ def h_ale_volume_filling(block: Block, ctx, edit: bool) -> None:
         if not edit:
             vid = _numint(kf, c1, STD8, block.long, 7)
             if vid:
-                ctx.sale_vel_vectors.add(vid)
+                ctx.scan.sale_vel_vectors.add(vid)
             if geom == "BOXCPT":
                 boxid = _numint(kf, c2, STD8, block.long, 2)
                 if boxid:
-                    ctx.sale_index_boxes.add(boxid)
+                    ctx.scan.sale_index_boxes.add(boxid)
             continue
         for fi, dim in dims.items():
             kf.scale_field(c2, STD8, block.long, fi, ctx.fac(dim))
@@ -2957,7 +2969,7 @@ def h_boundary_sale_mesh_face(block: Block, ctx, edit: bool) -> None:
             if not v or v <= 0:
                 continue
             if ydim is not None:
-                ctx.register_curve(v, TIME, ydim,
+                ctx.scan.register_curve(v, TIME, ydim,
                                    f"{block.name} {bctype} face")
             elif bctype == "AMBIENT" and v >= 100:
                 ctx.error(f"*{block.name}: BCTYPE=AMBIENT face value {v} "
@@ -3017,12 +3029,12 @@ def h_joint_stiffness_generalized(block: Block, ctx, edit: bool) -> None:
         for fi in (0, 1, 2):                       # LCIDPH LCIDT LCIDPS
             lcid = _numint(kf, data[1], STD8, block.long, fi)
             if lcid:
-                ctx.register_curve(lcid, DIMLESS, MOMENT,
+                ctx.scan.register_curve(lcid, DIMLESS, MOMENT,
                                    block.name + " moment(rotation)")
         for fi in (3, 4, 5):                       # DLCIDPH DLCIDT DLCIDPS
             lcid = _numint(kf, data[1], STD8, block.long, fi)
             if lcid:
-                ctx.register_curve(lcid, ANG_VEL, MOMENT,
+                ctx.scan.register_curve(lcid, ANG_VEL, MOMENT,
                                    block.name + " damping moment(rate)")
     for fi in (1, 3, 5):                           # FMPH FMT FMPS
         v = kf.get_number(data[2], STD8, block.long, fi)
@@ -3036,7 +3048,7 @@ def h_joint_stiffness_generalized(block: Block, ctx, edit: bool) -> None:
                       "convert this joint stiffness manually.")
             return
         if not edit:
-            ctx.register_curve(int(-v), DIMLESS, MOMENT,
+            ctx.scan.register_curve(int(-v), DIMLESS, MOMENT,
                                block.name + " yield moment(rotation)")
     if not edit:
         return
@@ -3082,7 +3094,7 @@ def h_shell_in_solid(block: Block, ctx, edit: bool) -> None:
         start = _numint(kf, data[1], STD8, block.long, 0)
         if not edit:
             if start:
-                ctx.register_curve(start, TIME, TIME,
+                ctx.scan.register_curve(start, TIME, TIME,
                                    block.name + " start/end time pairs")
         else:
             ctx.note(f"*{block.name}: END=-9999 makes START={start} a curve "
@@ -3170,7 +3182,7 @@ def h_icfd_prescribed_temp(block: Block, ctx, edit: bool) -> None:
         lcid = _numint(kf, li, STD8, block.long, 1)
         if not edit:
             if lcid:
-                ctx.register_curve(lcid, TIME, TEMP, block.name)
+                ctx.scan.register_curve(lcid, TIME, TEMP, block.name)
         else:
             kf.scale_field(li, STD8, block.long, 3, ctx.fac(TIME))  # DEATH
             kf.scale_field(li, STD8, block.long, 4, ctx.fac(TIME))  # BIRTH
@@ -3954,12 +3966,12 @@ def h_freq_ssd(block: Block, ctx, edit: bool) -> None:
                 ctx.error(f"*{block.name}: LCTYP={lctyp} is not documented "
                           "(R16 Vol I p.23-106).")
             else:
-                ctx.register_curve(lcdam, xdim, DIMLESS,
+                ctx.scan.register_curve(lcdam, xdim, DIMLESS,
                                    block.name + " LCDAM")
         if c4 is not None:
             erprlf = kf.get_number(c4, STD8, block.long, 2)
             if erprlf is not None and erprlf < 0:
-                ctx.register_curve(int(-erprlf), FREQ, DIMLESS,
+                ctx.scan.register_curve(int(-erprlf), FREQ, DIMLESS,
                                    block.name + " ERPRLF(frequency)")
         for li in loads:
             vad = _numint(kf, li, STD8, block.long, 3) or 0
@@ -3971,17 +3983,17 @@ def h_freq_ssd(block: Block, ctx, edit: bool) -> None:
             lc1 = _numint(kf, li, STD8, block.long, 4)
             lc2 = _numint(kf, li, STD8, block.long, 5)
             if lc1:
-                ctx.register_curve(lc1, FREQ, ydim, block.name + " LC1")
+                ctx.scan.register_curve(lc1, FREQ, ydim, block.name + " LC1")
             if lc2:
                 # LCFLAG=0: LC2 is a phase angle in degrees; LCFLAG=1: it is
                 # the imaginary part and carries LC1's dimension.
-                ctx.register_curve(lc2, FREQ,
+                ctx.scan.register_curve(lc2, FREQ,
                                    ydim if lcflag == 1 else DIMLESS,
                                    block.name + " LC2")
         if c8 is not None:
             lcftg = _numint(kf, c8, STD8, block.long, 0)
             if lcftg:
-                ctx.register_curve(lcftg, FREQ, TIME,
+                ctx.scan.register_curve(lcftg, FREQ, TIME,
                                    block.name + " LCFTG (duration)")
         return
 
@@ -4047,7 +4059,7 @@ def h_freq_frf(block: Block, ctx, edit: bool) -> None:
                 ctx.error(f"*{block.name}: LCTYP={lctyp} is not documented "
                           "(R16 Vol I p.23-46).")
             else:
-                ctx.register_curve(lcdam, xdim, DIMLESS,
+                ctx.scan.register_curve(lcdam, xdim, DIMLESS,
                                    block.name + " LCDAM")
         return
     kf.scale_field(data[0], STD8, block.long, 5, ctx.fac(FREQ))   # FNMAX
@@ -4129,7 +4141,7 @@ def h_freq_response_spectrum(block: Block, ctx, edit: bool) -> None:
                 ctx.error(f"*{block.name}: LDTYP={ldtyp} is not documented "
                           "(R16 Vol I p.23-84).")
             else:
-                ctx.register_curve(lcdamp, xdim, DIMLESS,
+                ctx.scan.register_curve(lcdamp, xdim, DIMLESS,
                                    block.name + " LCDAMP")
         for li in spectra:
             lctyp = _numint(kf, li, STD8, block.long, 0) or 0
@@ -4140,12 +4152,12 @@ def h_freq_response_spectrum(block: Block, ctx, edit: bool) -> None:
                 return
             lcid = _numint(kf, li, STD8, block.long, 2)
             if lcid:
-                ctx.register_curve(lcid, axes[0], axes[1],
+                ctx.scan.register_curve(lcid, axes[0], axes[1],
                                    block.name + " input spectrum")
                 # LC/TBID may name a *DEFINE_TABLE whose value axis is a
                 # critical-damping ratio (dimensionless) and whose member
                 # curves are the spectra themselves.
-                ctx.register_table(lcid, DIMLESS, axes[0], axes[1])
+                ctx.scan.register_table(lcid, DIMLESS, axes[0], axes[1])
         return
 
     for fi in (2, 3):                                       # FNMIN FNMAX
@@ -4238,17 +4250,17 @@ def h_freq_acoustic_bem(block: Block, ctx, edit: bool) -> None:
 
     if not edit:
         if c is not None and c < 0:
-            ctx.register_curve(int(-c), FREQ, VELOCITY,
+            ctx.scan.register_curve(int(-c), FREQ, VELOCITY,
                                block.name + " complex sound speed")
         if hold_card is not None:
             th = kf.get_number(hold_card, STD8, block.long, 0)
             if th is not None and th < 0:
-                ctx.register_curve(int(-th), DIMLESS, TIME,
+                ctx.scan.register_curve(int(-th), DIMLESS, TIME,
                                    block.name + " T_HOLD(panel)")
         for li in bc_cards:
             bemtyp = _numint(kf, li, STD8, block.long, 3) or 0
             if bemtyp < 0:
-                ctx.register_curve(-bemtyp, FREQ, VELOCITY,
+                ctx.scan.register_curve(-bemtyp, FREQ, VELOCITY,
                                    block.name + " |BEMTYP| velocity")
                 continue
             ydim = _BEM_TYPE_DIM.get(bemtyp)
@@ -4259,7 +4271,7 @@ def h_freq_acoustic_bem(block: Block, ctx, edit: bool) -> None:
             for fi in (4, 5):                                # LC1 LC2
                 lcid = _numint(kf, li, STD8, block.long, fi)
                 if lcid and ydim is not DIMLESS:
-                    ctx.register_curve(lcid, FREQ, ydim,
+                    ctx.scan.register_curve(lcid, FREQ, ydim,
                                        block.name + " LC1/LC2")
         return
 
@@ -4373,7 +4385,7 @@ def h_freq_acoustic_fem(block: Block, ctx, edit: bool) -> None:
 
     if not edit:
         if c is not None and c < 0:
-            ctx.register_curve(int(-c), FREQ, VELOCITY,
+            ctx.scan.register_curve(int(-c), FREQ, VELOCITY,
                                block.name + " complex sound speed")
         for li in bc_cards:
             vad = _numint(kf, li, STD8, block.long, 2) or 0
@@ -4387,11 +4399,11 @@ def h_freq_acoustic_fem(block: Block, ctx, edit: bool) -> None:
             lcid1 = _numint(kf, li, STD8, block.long, 4)
             lcid2 = _numint(kf, li, STD8, block.long, 5)
             if lcid1:
-                ctx.register_curve(lcid1, FREQ, ydim, block.name + " LCID1")
+                ctx.scan.register_curve(lcid1, FREQ, ydim, block.name + " LCID1")
             if lcid2:
                 # odd VAD -> LCID2 is a phase angle in degrees; even VAD ->
                 # it is the imaginary part and carries LCID1's dimension.
-                ctx.register_curve(lcid2, FREQ,
+                ctx.scan.register_curve(lcid2, FREQ,
                                    DIMLESS if vad % 2 else ydim,
                                    block.name + " LCID2")
         return
@@ -4453,7 +4465,7 @@ def h_freq_incident_wave(block: Block, ctx, edit: bool) -> None:
                      "sound pressure at a known radius.")
         if mag is not None and mag < 0:
             if not edit:
-                ctx.register_curve(int(-mag), FREQ, magdim,
+                ctx.scan.register_curve(int(-mag), FREQ, magdim,
                                    block.name + " magnitude(frequency)")
         elif edit:
             kf.scale_field(li, STD8, block.long, 1, ctx.fac(magdim))

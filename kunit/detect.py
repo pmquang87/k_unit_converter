@@ -71,6 +71,30 @@ def _pick_unit(toks, candidates):
     return next((t for t in hits if t not in _AMBIGUOUS_HEADER_UNITS),
                 hits[0] if hits else None)
 
+def header_comment_system(lines):
+    """First hand-written 'Unit: ...' banner in `lines` -> UnitSystem or None.
+
+    Used by convert() to flag an author banner that a conversion just made
+    stale.  Applies the same specificity rules as the in-scan header parsing
+    (a bare 'in'/'m'/'s' loses to a more specific unit on the same line);
+    only the FIRST matching comment line is considered."""
+    for ln in lines:
+        if not ln.lstrip().startswith("$") or not _HEADER_RE.search(ln):
+            continue
+        toks = [t.lower() for t in _TOKEN_RE.findall(ln)]
+        m = _pick_unit(toks, ("kg", "g", "ton", "tonne", "mg",
+                              "lbm", "lb", "slug", "slinch"))
+        l = _pick_unit(toks, ("mm", "cm", "m", "in", "inch", "ft", "foot"))
+        t = _pick_unit(toks, ("s", "sec", "ms", "us", "\u00b5s"))
+        if m and l and t:
+            try:
+                return parse_system(f"{m}-{l}-{t}")
+            except ValueError:
+                pass
+        return None
+    return None
+
+
 
 def _near(value: float, anchors, tol: float) -> bool:
     return any(abs(value / a - 1.0) <= tol for a in anchors if a)
