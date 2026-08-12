@@ -749,11 +749,34 @@ class FreqDomainNewTests(unittest.TestCase):
         i = d.index("*FREQUENCY_DOMAIN_ACOUSTIC_INCIDENT_WAVE")
         self.assertAlmostEqual(float(d[i + 1][10:20]), 1.0e-4)   # MAG pressure
         self.assertAlmostEqual(float(d[i + 1][20:30]), 1.0)      # cosine kept
+        # TYPE=2: Remark 2's p(r) = A*exp(-ikr)/r makes MAG a pressure TIMES
+        # a length, so it picks up the length factor the plane wave does not,
+        # and XC/YC/ZC are point-source coordinates rather than cosines
         sph = ("*KEYWORD\n*FREQUENCY_DOMAIN_ACOUSTIC_INCIDENT_WAVE\n"
                + F(2, 1.0, 4.0, 0.0, 0.0) + "\n*END\n")
         p = _write(sph, "sph.k")
-        with self.assertRaisesRegex(ConvertError, "spherical"):
-            convert(p, SI, TON, p + ".o.k", self_check=False)
+        ctx = convert(p, SI, TON, p + ".o.k", self_check=False)
+        d = _lines(p + ".o.k")
+        i = d.index("*FREQUENCY_DOMAIN_ACOUSTIC_INCIDENT_WAVE")
+        self.assertAlmostEqual(float(d[i + 1][10:20]), 1.0e-3)  # Pa*m -> MPa*mm
+        self.assertAlmostEqual(float(d[i + 1][20:30]), 4000.0)  # XC is a length
+        self.assertTrue(any("pressure*length" in w for w in ctx.warnings),
+                        ctx.warnings)
+
+    def test_incident_wave_magnitude_curve_matches_the_scalar(self):
+        # MAG < 0 names a frequency-dependent magnitude curve; its ordinate
+        # must take the same dimension the scalar branch would have, or the
+        # two branches disagree about what MAG means
+        deck = ("*KEYWORD\n*FREQUENCY_DOMAIN_ACOUSTIC_INCIDENT_WAVE\n"
+                + F(2, -7, 4.0, 0.0, 0.0) + "\n"
+                "*DEFINE_CURVE\n" + F(7, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                + F("100.0", w=20) + F("1.0", w=20) + "\n*END\n")
+        p = _write(deck, "sphcurve.k")
+        convert(p, SI, TON, p + ".o.k", self_check=False)
+        d = _lines(p + ".o.k")
+        j = d.index(F(7, 0, 1.0, 1.0, 0.0, 0.0, 0, 0))
+        self.assertAlmostEqual(float(d[j + 1][0:20]), 100.0)    # frequency
+        self.assertAlmostEqual(float(d[j + 1][20:40]), 1.0e-3)  # Pa*m -> MPa*mm
 
 
 class SaleTests(unittest.TestCase):

@@ -4390,11 +4390,20 @@ def h_freq_incident_wave(block: Block, ctx, edit: bool) -> None:
     MAG < 0 makes |MAG| a frequency-dependent magnitude curve id.
 
     For TYPE = 1 the magnitude is the plane-wave pressure amplitude A of
-    p = A*exp(-ik(ax+by+cz)) - a PRESSURE.  For TYPE = 2 Remark 2 gives
-    p(r) = A*exp(-ikr)/r, which makes A a pressure TIMES a length, but the
-    manual never states the units of MAG for that branch.  Rather than pick
-    between two defensible readings on a field nobody could confirm, the
-    spherical branch is refused.
+    p = A*exp(-ik(ax+by+cz)) - a PRESSURE.
+
+    For TYPE = 2 Remark 2 gives p(r) = A*exp(-ikr)/r "where A is the
+    magnitude of the incident wave and r is the distance measured from the
+    position of the point source", which makes A a pressure TIMES a length.
+    The manual never says so in words, but the equation leaves no room, and
+    the sibling keyword settles it: *LOAD_ACOUSTIC_SOURCE SRCTYP=12
+    (p.33-5..33-6) writes the same field as a plain pressure P0 - and to do
+    that it has to carry an extra "reference radius r0 where the pressure
+    equals p0" and a P_inc = P0*r0/r formula.  There is no r0 here and none
+    in the formula, so MAG*1/r is the pressure and MAG itself is not.  It is
+    scaled as pressure*length (which shares STIFF's signature) with a loud
+    warning, and the MAG < 0 curve branch is scaled the same way rather than
+    quietly assuming the opposite.
     """
     kf = ctx.kf
     for li in block.data:
@@ -4406,22 +4415,21 @@ def h_freq_incident_wave(block: Block, ctx, edit: bool) -> None:
                       "(1 = plane wave, 2 = spherical wave, R16 Vol I "
                       "p.23-37) - refusing to guess.")
             return
-        if wtype == 2 and mag is not None and mag > 0:
-            ctx.error(f"*{block.name}: TYPE=2 (spherical wave) with "
-                      f"MAG={mag}. Remark 2 (R16 Vol I p.23-38) defines "
-                      "p(r) = A*exp(-ikr)/r, which makes MAG a pressure "
-                      "TIMES a length, but the manual never states its "
-                      "units - kunit refuses to pick between "
-                      "pressure*length and plain pressure. Convert this "
-                      "incident wave manually (the XC/YC/ZC point-source "
-                      "coordinates are lengths).")
-            return
+        # pressure*length for the spherical branch, plain pressure for plane
+        magdim = STIFF if wtype == 2 else PRESSURE
+        if wtype == 2:
+            ctx.warn(f"*{block.name}: TYPE=2 (spherical wave) MAG scaled as "
+                     "pressure*length, the only reading Remark 2's "
+                     "p(r) = A*exp(-ikr)/r allows (R16 Vol I p.23-37..23-38); "
+                     "the manual never states MAG's units for this branch, so "
+                     "check the amplitude against the source's intended "
+                     "sound pressure at a known radius.")
         if mag is not None and mag < 0:
             if not edit:
-                ctx.register_curve(int(-mag), FREQ, PRESSURE,
+                ctx.register_curve(int(-mag), FREQ, magdim,
                                    block.name + " magnitude(frequency)")
-        elif edit and wtype == 1:
-            kf.scale_field(li, STD8, block.long, 1, ctx.fac(PRESSURE))
+        elif edit:
+            kf.scale_field(li, STD8, block.long, 1, ctx.fac(magdim))
         if edit and wtype == 2:
             for fi in (2, 3, 4):                          # XC YC ZC
                 kf.scale_field(li, STD8, block.long, fi, ctx.fac(LENGTH))
