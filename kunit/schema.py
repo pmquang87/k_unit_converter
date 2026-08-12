@@ -761,7 +761,9 @@ _MAT_ALIASES = {
     # R16 Vol II p.2-201: *MAT_SOIL_AND_FOAM_FAILURE "input for this
     # model is the same as *MATERIAL_SOIL_AND_FOAM (Type 5)" - it only
     # adds tensile-failure behaviour, no card of its own.
-    "MAT_005": "MAT_SOIL_AND_FOAM", "MAT_014": "MAT_SOIL_AND_FOAM_FAILURE",
+    # (resolve() looks the alias table up ONCE, so MAT_014 has to point at the
+    # spec name directly rather than at the _FAILURE spelling.)
+    "MAT_005": "MAT_SOIL_AND_FOAM", "MAT_014": "MAT_SOIL_AND_FOAM",
     "MAT_SOIL_AND_FOAM_FAILURE": "MAT_SOIL_AND_FOAM",
     "MAT_148": "MAT_GAS_MIXTURE",
     # R16 Vol II p.2-2000: *MAT_ALE_GAS_MIXTURE is "exactly the same as
@@ -1210,7 +1212,7 @@ def h_contact(block: Block, ctx, edit: bool) -> None:
         # It comes BEFORE the optional cards A and B.
         plan.append({1: PRESSURE, 2: PRESSURE, 4: STIFF, 5: STIFF,
                      7: STIFF_LEN})
-    elif drawbead:
+    elif drawbead and len(data) > mpp_off + 3:
         plan.append({2: LENGTH})                         # Card 4.1 DBDTH
         nbead = _numint(kf, data[mpp_off + 3], STD8, block.long, 7) or 0
         if nbead > 0:

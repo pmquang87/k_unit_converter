@@ -1774,13 +1774,17 @@ class CompositeRubberSoilTests(unittest.TestCase):
             float(lines[i + 5][0:10]) / (0.345 * float(fp)), 1.0, places=5)
 
     def test_mat_soil_and_foam_failure_is_an_alias(self):
-        lines, ctx = self._conv(
-            self.SOIL.replace("*MAT_SOIL_AND_FOAM",
-                              "*MAT_SOIL_AND_FOAM_FAILURE"))
-        i = lines.index("*MAT_SOIL_AND_FOAM_FAILURE")
-        fp = float(factor(PRESSURE, self.SLIN, TON))
-        self.assertAlmostEqual(float(lines[i + 1][40:50]) / (0.12 * fp * fp),
-                               1.0, places=5)
+        # both the _FAILURE spelling and the MAT_014 number must land on the
+        # MAT_005 spec - resolve() reads the alias table once, so a chained
+        # alias would silently leave the material unknown
+        for spelling in ("*MAT_SOIL_AND_FOAM_FAILURE", "*MAT_014"):
+            lines, ctx = self._conv(
+                self.SOIL.replace("*MAT_SOIL_AND_FOAM", spelling))
+            self.assertEqual(ctx.unknown, {}, spelling)
+            i = lines.index(spelling)
+            fp = float(factor(PRESSURE, self.SLIN, TON))
+            self.assertAlmostEqual(
+                float(lines[i + 1][40:50]) / (0.12 * fp * fp), 1.0, places=5)
 
     def _comp(self, card5):
         return ("*KEYWORD\n*MAT_ENHANCED_COMPOSITE_DAMAGE_TITLE\ncarbon\n"
