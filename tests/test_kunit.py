@@ -2273,3 +2273,44 @@ class IcfdLsoTests(unittest.TestCase):
         i = lines.index("*PART_ADAPTIVE_FAILURE")
         self.assertAlmostEqual(float(lines[i + 1][10:20]), 0.1)   # mm -> mm
         self.assertEqual(int(lines[i + 1][20:30]), 0)             # TERM flag
+
+
+class BoltPreloadTests(unittest.TestCase):
+    """*INITIAL_AXIAL_FORCE_BEAM (R16 Vol I p.28-10), kg-mm-ms -> ton-mm-s.
+
+    show-cases/bolts writes the preload as a 0->1 ramp whose SFA and SFO
+    carry the magnitudes (dtPreStr = 1.0 ms, bltForce = 28.8 kN).  kunit
+    scales the curve's DATA POINTS and leaves SFA/SFO alone, so what has to
+    come out right is the PRODUCT."""
+
+    DECK = ("*KEYWORD\n*INITIAL_AXIAL_FORCE_BEAM\n"
+            + F(100, 100, 1.0, 0) + "\n"
+            "*DEFINE_CURVE\n" + F(100, 0, 1.0, 28.8, 0.0, 0.0, 0, 0) + "\n"
+            + F("0.0", w=20) + F("0.0", w=20) + "\n"
+            + F("1.0", w=20) + F("1.0", w=20) + "\n*END\n")
+
+    def test_preload_curve_product_is_preserved(self):
+        p = _write(self.DECK)
+        out = p + ".o.k"
+        ctx = convert(p, KGMM, TON, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*INITIAL_AXIAL_FORCE_BEAM")
+        self.assertEqual(ctx.unknown, {})
+        # the card itself is ids, a factor and a flag - nothing scales
+        self.assertEqual(lines[i + 1], F(100, 100, 1.0, 0))
+        j = lines.index(F(100, 0, 1.0, 28.8, 0.0, 0.0, 0, 0))   # SFA/SFO kept
+        a = float(lines[j + 2][0:20])
+        o = float(lines[j + 2][20:40])
+        self.assertAlmostEqual(a, 1.0e-3)          # 1.0 ms of ramp -> 0.001 s
+        self.assertAlmostEqual(o, 1000.0)
+        # SFA * a = 0.001 s and SFO * o = 28.8 kN in newtons
+        self.assertAlmostEqual(1.0 * a, 1.0e-3)
+        self.assertAlmostEqual(28.8 * o, 28800.0)
+
+    def test_preload_curve_is_not_left_unreferenced(self):
+        # the point of the handler: without it the curve gets no dimensions
+        # and h_define_curve leaves the preload unscaled with a warning
+        p = _write(self.DECK)
+        ctx = convert(p, KGMM, TON, p + ".o.k", self_check=False)
+        self.assertFalse(any("unreferenced" in w or "no referencing" in w
+                             for w in ctx.warnings), ctx.warnings)

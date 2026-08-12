@@ -1634,6 +1634,33 @@ def h_load_thermal_variable_node(block: Block, ctx, edit: bool) -> None:
         ctx.count(block.name)
 
 
+def h_initial_axial_force_beam(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol I p.28-10..28-12 (*INITIAL_AXIAL_FORCE_BEAM): BSID LCID SCALE
+    KBEND - a beam-set id, a curve id, a scale factor and a stiffness flag.
+
+    Nothing on the card is dimensional, but LCID is a "load curve ID defining
+    preload force versus time", so the curve it names has to be registered or
+    it would be left unscaled with a warning - and in bolt decks that curve
+    IS the preload.  A handler rather than spec.curves because spec.curves
+    only ever sees the first data line, and one keyword can carry a card per
+    bolt group.
+
+    Note SCALE stays put: it multiplies the curve, and h_define_curve scales
+    the curve's own ordinates, so the product comes out right.  The same goes
+    for a curve whose SFO carries the magnitude - show-cases/bolts writes
+    SFA/SFO as *PARAMETERs (dtPreStr, bltForce) against a 0->1 ramp.
+    """
+    kf = ctx.kf
+    if edit:
+        ctx.count(block.name + " (curve-carried)")
+        return
+    for li in block.data:
+        lcid = _numint(kf, li, STD8, block.long, 1)
+        if lcid:
+            ctx.register_curve(lcid, TIME, FORCE,
+                               block.name + " preload force(time)")
+
+
 def h_load_thermal_load_curve(block: Block, ctx, edit: bool) -> None:
     """R16 Vol I p.33-160 (*LOAD_THERMAL_LOAD_CURVE): repeating LCID LCIDDR
     cards.  Nothing on the card itself is dimensional, but both curves give a
@@ -4614,6 +4641,7 @@ CUSTOM: Dict[str, Callable] = {
     "FREQUENCY_DOMAIN_ACOUSTIC_INCIDENT_WAVE": h_freq_incident_wave,
     "AIRBAG_SIMPLE_AIRBAG_MODEL": h_airbag_simple,
     "AIRBAG_SIMPLE_PRESSURE_VOLUME": h_airbag_simple,
+    "INITIAL_AXIAL_FORCE_BEAM": h_initial_axial_force_beam,
     "LOAD_THERMAL_LOAD_CURVE": h_load_thermal_load_curve,
     "LOAD_THERMAL_VARIABLE": h_load_thermal_variable,
     "LOAD_THERMAL_VARIABLE_NODE": h_load_thermal_variable_node,
