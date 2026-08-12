@@ -146,9 +146,19 @@ both systems share the temperature unit), discrete springs/dampers S01–S05
 MOVING/FORCES/ID), AUTOMATIC contact `TIEBREAK` Card 4 (OPTION 13/14 and the
 option-dependent PARAM are refused/warned), `*INITIAL_STRESS_SHELL/SOLID`
 (LARGE=0, no history variables — those have material-dependent units),
-`*INITIAL_STRESS_SECTION`, `*DEFINE_CURVE_SMOOTH`. Temperature fields are
-classified but **never rescaled**. Anything else aborts loudly by design;
-extending = one `Spec` line in `kunit/schema.py`.
+`*INITIAL_STRESS_SECTION`, `*DEFINE_CURVE_SMOOTH`, the thermal boundary set
+(`*BOUNDARY_TEMPERATURE/CONVECTION/RADIATION`, `*LOAD_THERMAL_VARIABLE_NODE`,
+`*CONTROL_THERMAL_SOLVER` SBC — the convection coefficient, the radiation
+coefficient σεF and the Stefan-Boltzmann constant all share the
+power-per-area signature under the same-temperature-unit assumption), the ALE
+gas mixture (`*MAT_GAS_MIXTURE`'s RUNIV switches its species cards between
+per-mass and per-mole), `*MAT_FABRIC`, `MAT_054/055`, `MAT_005`
+(A0/A1/A2 are a stress², a stress and a pure number), `*MAT_SIMPLIFIED_RUBBER/FOAM`,
+`*CONTACT_DRAWBEAD`, and the isogeometric family (only
+`*IGA_2D_NURBS_XYZ`'s control points, `*SECTION_IGA_SHELL`'s thickness and
+`*IGA_SHELL`'s NISR/NISS-when-negative carry units; u/v/w and knots do not).
+Temperature fields are classified but **never rescaled**. Anything else
+aborts loudly by design; extending = one `Spec` line in `kunit/schema.py`.
 
 ## Validation
 
