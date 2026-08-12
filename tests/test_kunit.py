@@ -144,6 +144,32 @@ class DetectTests(unittest.TestCase):
         self.assertTrue(ctx.self_check.startswith("OK"), ctx.self_check)
         self.assertEqual(ctx.warnings, [])
 
+    # the author's own banner survives conversion and then lies.  It sits
+    # ABOVE the kunit stamp (which convert() inserts after *KEYWORD), so a
+    # first-comment-wins scan credits the SOURCE system with +8 and the
+    # self-check fails on a perfectly converted deck - what nvh/4.3.frf.solid.k
+    # did.  The stamp must win wherever the banner is.
+    DECK_STALE_BANNER = "$ Unit: m, kg, s, Pa\n" + DECK_WEAK_SI
+
+    def test_kunit_stamp_outranks_stale_header_comment(self):
+        p = _write(self.DECK_STALE_BANNER)
+        out = p + ".ton.k"
+        ctx = convert(p, SI, TON, out, self_check=True)
+        self.assertTrue(ctx.self_check.startswith("OK"), ctx.self_check)
+        v = detect(out)
+        self.assertEqual(v.system, TON)
+        self.assertFalse(any("header comment declares" in e
+                             for e in v.evidence), v.evidence)
+        self.assertTrue(any("still declares kg-m-s" in n for n in ctx.notes),
+                        ctx.notes)
+
+    def test_header_comment_still_read_without_a_stamp(self):
+        # the fallback must keep working for decks kunit has never touched
+        v = detect(_write(self.DECK_STALE_BANNER))
+        self.assertEqual(v.system, SI)
+        self.assertTrue(any("header comment declares kg-m-s" in e
+                            for e in v.evidence), v.evidence)
+
 
 class ConvertTests(unittest.TestCase):
     def _conv(self, text=DECK_SI, **kw):

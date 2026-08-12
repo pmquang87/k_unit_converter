@@ -365,6 +365,21 @@ def _out_path_for(in_path: str, dst: UnitSystem) -> str:
     return f"{stem}__{dst.key}{ext}"
 
 
+def _note_stale_unit_comment(ctx: "Ctx", kf: KFile, src: UnitSystem) -> None:
+    """Point out an author's 'Unit: ...' banner that the conversion made false.
+
+    Comments are never rewritten (they may be a licence block or a hand
+    edit), but leaving one behind silently is a trap for the next reader -
+    and for kunit's own detector, which only ignores it because the provenance
+    stamp outranks it."""
+    from .detect import header_comment_system
+    stale = header_comment_system(kf.lines[:80])
+    if stale is not None and stale == src:
+        ctx.note(f"the deck's own header comment still declares "
+                 f"{src.key} - it is now stale; kunit's provenance stamp "
+                 "above it records the real unit system")
+
+
 def convert(path: str, src: UnitSystem, dst: UnitSystem, out_path: str,
             blast_unit: Optional[int] = None,
             allow_unknown: bool = False,
@@ -461,6 +476,8 @@ def convert(path: str, src: UnitSystem, dst: UnitSystem, out_path: str,
                 os.remove(tmp)
             raise
         ctx.written.append((out, bak))
+        if cp == main_in:
+            _note_stale_unit_comment(ctx, kf, src)
 
     # self-check: the output should auto-detect as the target system from
     # PHYSICAL evidence alone - header comments (including the kunit stamp
