@@ -1497,11 +1497,11 @@ class RandomFatigueTests(unittest.TestCase):
     # 3 = kg-mm-ms, 4 = ton-mm-s.  A 0.01 g^2/Hz flat spectrum from 20 to
     # 2000 Hz is the textbook MIL-STD input and must survive an in -> mm
     # conversion untouched, with only the flag rewritten.
-    def _rv_g(self, unit, umlt=0.0):
+    def _rv_g(self, unit, umlt=0.0, vaflag=1):
         return ("*KEYWORD\n*FREQUENCY_DOMAIN_RANDOM_VIBRATION\n"
                 + F(1, 10, 0.0, 2000.0, 0) + "\n"
                 + F(0.02, 0, 0, 0.0, 0.0, 0) + "\n"
-                + F(1, 1, unit, umlt, 0, 0, 1, 0) + "\n"
+                + F(vaflag, 1, unit, umlt, 0, 0, 1, 0) + "\n"
                 + F(0, 0, 0, 0.0, "", 0, 0, 0.1) + "\n"
                 + F(0, 0, 2, 11, 0, 0, 0, 0) + "\n"
                 "*DEFINE_CURVE\n" + F(11, 0, 1.0, 0.01, 0.0, 0.0, 0, 0) + "\n"
@@ -1558,6 +1558,24 @@ class RandomFatigueTests(unittest.TestCase):
         i = lines.index("*FREQUENCY_DOMAIN_RANDOM_VIBRATION")
         self.assertEqual(int(lines[i + 3][20:30]), -1)         # flag kept
         self.assertAlmostEqual(float(lines[i + 3][30:40]) / 9.80665e9, 1.0)
+
+    def test_freq_rv_unit_flag_leaves_pressure_psd_dimensional(self):
+        # UNIT is the "Flag for acceleration unit conversion" (p.23-66).  A
+        # random-pressure excitation (VAFLAG=2) is not in g, so UNIT != 0
+        # must NOT strip the pressure^2 out of its PSD ordinate - only the
+        # flag itself is rewritten.
+        SLIN = parse_system("slinch-in-s")
+        p = _write(self._rv_g(2, vaflag=2))
+        out = p + ".o.k"
+        convert(p, SLIN, TON, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*FREQUENCY_DOMAIN_RANDOM_VIBRATION")
+        self.assertEqual(int(lines[i + 3][20:30]), 4)          # UNIT 2 -> 4
+        j = lines.index(F(11, 0, 1.0, 0.01, 0.0, 0.0, 0, 0))
+        self.assertAlmostEqual(float(lines[j + 1][0:20]), 20.0)     # frequency
+        psi_mpa = (0.45359237 * 9.80665 / 0.0254 / 1000.0) / 25.4
+        self.assertAlmostEqual(
+            float(lines[j + 1][20:40]) / psi_mpa ** 2, 1.0, places=6)
 
     def test_freq_rv_wave_vaflag_refused(self):
         deck = ("*KEYWORD\n*FREQUENCY_DOMAIN_RANDOM_VIBRATION\n"

@@ -3679,11 +3679,14 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
     UNIT != 0 does two things at once: it puts the acceleration input in g,
     AND it declares the unit system used for everything else - 1 = kg-m-s,
     2 = slinch-in-s, 3 = kg-mm-ms, 4 = ton-mm-s (p.23-66..67), the same four
-    systems as the acoustic BEM IUNITS flag.  So the PSD ordinate is g^2 per
-    frequency, carrying no mass or length exponent, and the flag itself is a
-    declaration that has to be REWRITTEN for the destination rather than
-    scaled.  UNIT = -1 keeps its own UMLT multiplier, which is a genuine
-    acceleration and converts.
+    systems as the acoustic BEM IUNITS flag.  So for an ACCELERATION
+    excitation the PSD ordinate is g^2 per frequency, carrying no mass or
+    length exponent, and the flag itself is a declaration that has to be
+    REWRITTEN for the destination rather than scaled.  It is the "Flag for
+    acceleration unit conversion" (p.23-66), so a pressure, force, velocity
+    or displacement PSD is NOT in g^2 under UNIT != 0 and keeps its own
+    dimension; only the flag is rewritten.  UNIT = -1 keeps its own UMLT
+    multiplier, which is a genuine acceleration and converts.
 
     VAFLAG 5-7 read LDFLW/LDSPN, whose ordinate the manual never defines, and
     VAFLAG 4 is not modelled; LDTYP=1 (SPL in dB) references an SI-flavoured
@@ -3750,7 +3753,7 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
                           or (f7 or 0) < 0 or bool(num(c4, 4)))
     base = _RV_BASE_DIM[vaflag]
     psd = _RV_PSD_DIM.get(base)
-    if unit != 0:
+    if unit != 0 and base == ACCEL:
         # UNIT != 0 declares that the acceleration input is expressed in g -
         # a fixed physical constant, "1g = 9.81 m/s^2 = 386.089 inch/s^2"
         # (Remark 7, p.23-76) - so the PSD ordinate is g^2 per frequency and
@@ -3758,6 +3761,13 @@ def h_freq_random_vibration(block: Block, ctx, edit: bool) -> None:
         # is the "per frequency", i.e. a TIME.  Registering ACCEL_PSD here
         # instead would multiply a 0.01 g^2/Hz spectrum by 645.16 on an
         # inch -> mm conversion.
+        #
+        # UNIT is the "Flag for acceleration unit conversion" (p.23-66), so
+        # this only applies where the excitation IS an acceleration, i.e.
+        # VAFLAG 1 and 11.  A pressure, force, velocity or displacement PSD
+        # keeps its own dimension under UNIT != 0; there the flag says only
+        # which unit system "elsewhere" means, and that half of it is handled
+        # by rewriting the flag in the edit pass below.
         base, psd = DIMLESS, TIME
 
     # ── card-count plan ──────────────────────────────────────────────────
