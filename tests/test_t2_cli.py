@@ -31,9 +31,13 @@ UNREF_CURVE = ("*KEYWORD\n*DEFINE_CURVE\n"
                + F(5, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
                + F("0.0", w=20) + F("9.81", w=20) + "\n*END\n")
 
-# an unknown keyword forces a ConvertError unless --allow-unknown
+# an unknown keyword forces a ConvertError unless --allow-unknown.
+# *USER_LOADING is a deliberate choice: its card holds user-defined parameters
+# whose meaning lives in the user's own subroutine, so it can never be
+# classified and will not quietly become covered the way
+# *AIRBAG_SIMPLE_PRESSURE_VOLUME (which this fixture used to use) did.
 UNKNOWN_KW = STEEL_SI.replace(
-    "*END", "*AIRBAG_SIMPLE_PRESSURE_VOLUME\n         1\n*END")
+    "*END", "*USER_LOADING\n       1.0       2.0\n*END")
 
 # no usable unit evidence -> auto-detect returns None
 NO_EVIDENCE = "*KEYWORD\n*TITLE\nnothing here\n*END\n"
