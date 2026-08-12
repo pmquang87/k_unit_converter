@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from kunit.schema import (
     resolve, SPECS, CUSTOM, HARD_FLAGS,
     h_contact, h_load_body, h_prescribed_motion, h_rigidwall_planar,
+    h_rigidwall_geometric,
     h_database_dt, h_database_frequency, h_mat_cscm, h_define_table,
     h_define_curve,
 )
@@ -89,15 +90,28 @@ class RouterVerdictTests(unittest.TestCase):
             self.assertIs(payload, h_contact, n)
 
     def test_contact_unknown(self):
+        # DRAWBEAD and MPP moved to h_contact once Card 4.1 and the MPP card
+        # shift were modelled; THERMAL still inserts an unmodelled THRM card
+        # between the mandatory and optional cards, and the DRAWBEAD _BENDING
+        # and _INITIALIZE options insert Cards 4.2/4.3 ahead of the rest.
         for n in ("CONTACT_TIEBREAK_NODES_ONLY",
-                  "CONTACT_AUTOMATIC_SINGLE_SURFACE_DRAWBEAD",
-                  "CONTACT_AUTOMATIC_SINGLE_SURFACE_MPP",
+                  "CONTACT_AUTOMATIC_SINGLE_SURFACE_THERMAL",
+                  "CONTACT_DRAWBEAD_BENDING",
+                  "CONTACT_DRAWBEAD_INITIALIZE",
                   "CONTACT_AUTOMATIC_SINGLE_SURFACE_DAMPING",
                   "CONTACT_2D_AUTOMATIC_SURFACE_TO_SURFACE",
                   "CONTACT_ENTITY", "CONTACT_GEBOD_LOWER",
                   "CONTACT_INTERIOR", "CONTACT_GUIDED_CABLE",
                   "CONTACT_COUPLING", "CONTACT_AUTO_MOVE"):
             self.assertEqual(resolve(n), ("unknown", None), n)
+
+    def test_contact_drawbead_and_mpp_are_custom(self):
+        for n in ("CONTACT_DRAWBEAD", "CONTACT_DRAWBEAD_ID",
+                  "CONTACT_AUTOMATIC_SINGLE_SURFACE_DRAWBEAD",
+                  "CONTACT_AUTOMATIC_SINGLE_SURFACE_MPP"):
+            kind, payload = resolve(n)
+            self.assertEqual(kind, "custom", n)
+            self.assertIs(payload, h_contact, n)
 
     # ── LOAD_BODY_ family ───────────────────────────────────────────────────
     def test_load_body_custom(self):
@@ -137,7 +151,12 @@ class RouterVerdictTests(unittest.TestCase):
     def test_rigidwall(self):
         self.assertIs(resolve("RIGIDWALL_PLANAR")[1], h_rigidwall_planar)
         self.assertIs(resolve("RIGIDWALL_PLANAR_ORTHO")[1], h_rigidwall_planar)
-        self.assertEqual(resolve("RIGIDWALL_GEOMETRIC"), ("unknown", None))
+        # GEOMETRIC got its own handler for the FLAT/PRISM/SPHERE shape cards
+        for n in ("RIGIDWALL_GEOMETRIC", "RIGIDWALL_GEOMETRIC_FLAT",
+                  "RIGIDWALL_GEOMETRIC_SPHERE_MOTION"):
+            kind, payload = resolve(n)
+            self.assertEqual(kind, "custom", n)
+            self.assertIs(payload, h_rigidwall_geometric, n)
 
     # ── DATABASE_ families ──────────────────────────────────────────────────
     def test_database_binary(self):
