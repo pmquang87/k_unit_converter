@@ -43,6 +43,11 @@ DAMP      : Dim = (1, 0, -1)     # translational damping force/velocity
 ROT_DAMP  : Dim = (1, 2, -1)     # rotational damping moment/(rad/time)
 STIFF_LEN : Dim = (1, -2, -2)    # stiffness per length (tiebreak CN, stress/length)
 STRESS_M3 : Dim = (-3, 3, 6)     # 1/stress^3 (MAT_022 ALPH nonlinear shear term)
+STRESS_SQ : Dim = (2, -2, -4)    # stress^2 (MAT_005 yield constant A0: the
+                                 # yield surface is phi = J2 - (a0 + a1 p +
+                                 # a2 p^2) and J2 is a product of two
+                                 # stresses, so a0 ~ stress^2, a1 ~ stress
+                                 # and a2 is dimensionless)
 PWR_VOL   : Dim = (1, -1, -3)    # power/volume: EOS energy-deposition rate
                                  # dE/dt, E being energy per reference volume
 POWER     : Dim = (1, 2, -3)     # power (SSD_ERP reference value ERPREF, the
@@ -87,7 +92,8 @@ DIM_NAMES = {
     DC_FRIC: "1/velocity", ANG_ACCEL: "1/time^2",
     DAMP: "damping F/v | mass flow rate",
     ROT_DAMP: "damping M/(rad/t)", STIFF_LEN: "stiffness/length",
-    STRESS_M3: "1/stress^3", PWR_VOL: "power/volume", POWER: "power",
+    STRESS_M3: "1/stress^3", STRESS_SQ: "stress^2",
+    PWR_VOL: "power/volume", POWER: "power",
     INV_PRESSURE: "1/stress", ACOUST_IMP: "acoustic impedance p/v",
     SPEC_HEAT: "specific heat (same temp unit)",
     THERM_COND: "thermal conductivity (same temp unit)",
@@ -109,6 +115,7 @@ DIM_BY_NAME = {
     "force": FORCE, "moment": MOMENT, "energy": ENERGY,
     "stiffness": STIFF, "damping": DAMP, "viscosity": VISCOSITY,
     "powervol": PWR_VOL, "power": POWER, "massrate": DAMP,
+    "stresssq": STRESS_SQ,
     "invpressure": INV_PRESSURE, "invstress": INV_PRESSURE,
     "impedance": ACOUST_IMP, "acoustimp": ACOUST_IMP,
     "heatflux": HEAT_FLUX, "htc": HEAT_FLUX,

@@ -9,8 +9,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from kunit import ConvertError, convert, detect, factor, parse_system
 from kunit.parser import KFile, parse_number
-from kunit.units import (ACCEL, DENSITY, LENGTH, MASS, PRESSURE, TIME,
-                         VELOCITY, blast_unit5_factors)
+from kunit.units import (ACCEL, DENSITY, FORCE, LENGTH, MASS, PRESSURE,
+                         TIME, VELOCITY, blast_unit5_factors)
 
 SI = parse_system("kg-m-s")
 TON = parse_system("ton-mm-s")
@@ -249,14 +249,17 @@ class ConvertTests(unittest.TestCase):
             self.assertAlmostEqual(float(na[sl]), float(nb[sl]), places=6)
 
     def test_unknown_keyword_refused(self):
-        deck = DECK_SI.replace("*END", "*MAT_FABRIC\n"
+        # MAT_183 is a near-neighbour of *MAT_SIMPLIFIED_RUBBER/FOAM with a
+        # different card layout, so it doubles as a guard that the slashed
+        # keyword's spec does not leak onto the underscored one
+        deck = DECK_SI.replace("*END", "*MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE\n"
                                "         1\n*END")
         p = _write(deck)
         with self.assertRaises(ConvertError):
             convert(p, SI, TON, p + ".o.k", self_check=False)
         ctx = convert(p, SI, TON, p + ".o.k", allow_unknown=True,
                       self_check=False)
-        self.assertIn("MAT_FABRIC", ctx.unknown)
+        self.assertIn("MAT_SIMPLIFIED_RUBBER_WITH_DAMAGE", ctx.unknown)
 
     def test_parameter_field_refused(self):
         deck = DECK_SI.replace(
@@ -1732,3 +1735,211 @@ class GasMixtureTests(unittest.TestCase):
         self.assertAlmostEqual(float(lines[j + 1][20:40]), 1e5)    # velocity
         j = lines.index(F(102, 0, 1.0, 1.0, 0.0, 0.0, 0, 0))
         self.assertAlmostEqual(float(lines[j + 1][20:40]), 1e-3)   # mass rate
+
+
+class CompositeRubberSoilTests(unittest.TestCase):
+    """*MAT_054/055, *MAT_005 and *MAT_181 (R16 Vol II p.2-419, p.2-170,
+    p.2-1210), slinch-in-s -> ton-mm-s."""
+
+    SLIN = parse_system("slinch-in-s")
+
+    def _conv(self, deck, src=None, **kw):
+        p = _write(deck)
+        out = p + ".o.k"
+        ctx = convert(p, src or self.SLIN, TON, out, self_check=False, **kw)
+        return _lines(out), ctx
+
+    SOIL = ("*KEYWORD\n*MAT_SOIL_AND_FOAM\n"
+            + F(1, "6.7400E-11", 57.6, 17.94, 0.12, 0.0, 0.0, -0.5) + "\n"
+            + F(0.0, 0.0, 0) + "\n"
+            + F(-0.025, -0.05, -0.105, -0.357, -0.693, -0.916, -1.2, -1.61) + "\n"
+            + F(0.0, 0.0) + "\n"
+            + F(0.345, 0.517, 0.689, 0.807, 1.11, 1.24, 1.3, 1.5) + "\n"
+            + F(0.0, 0.0) + "\n*END\n")
+
+    def test_mat_soil_and_foam_yield_constants(self):
+        lines, ctx = self._conv(self.SOIL)
+        i = lines.index("*MAT_SOIL_AND_FOAM")
+        fp = factor(PRESSURE, self.SLIN, TON)
+        # G and PC are stresses, A0 is a stress SQUARED, A2 is dimensionless
+        self.assertAlmostEqual(float(lines[i + 1][20:30]) / (57.6 * float(fp)), 1.0)
+        # PC lands on -0.0034474 in a 10-char field, a 6e-6 relative
+        # rounding - the same figure the report calls 'worst field-width'
+        self.assertAlmostEqual(
+            float(lines[i + 1][70:80]) / (-0.5 * float(fp)), 1.0, places=4)
+        self.assertAlmostEqual(
+            float(lines[i + 1][40:50]) / (0.12 * float(fp) ** 2), 1.0, places=5)
+        self.assertAlmostEqual(float(lines[i + 3][0:10]), -0.025)
+        self.assertAlmostEqual(
+            float(lines[i + 5][0:10]) / (0.345 * float(fp)), 1.0, places=5)
+
+    def test_mat_soil_and_foam_failure_is_an_alias(self):
+        lines, ctx = self._conv(
+            self.SOIL.replace("*MAT_SOIL_AND_FOAM",
+                              "*MAT_SOIL_AND_FOAM_FAILURE"))
+        i = lines.index("*MAT_SOIL_AND_FOAM_FAILURE")
+        fp = float(factor(PRESSURE, self.SLIN, TON))
+        self.assertAlmostEqual(float(lines[i + 1][40:50]) / (0.12 * fp * fp),
+                               1.0, places=5)
+
+    def _comp(self, card5):
+        return ("*KEYWORD\n*MAT_ENHANCED_COMPOSITE_DAMAGE_TITLE\ncarbon\n"
+                + F(1, "1.5000E-4", 147000.0, 7580.0, 0.0, 0.01547, 0, 0) + "\n"
+                + F(3960.0, 3000.0, 3960.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + F(1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+                + F(0, 0, 0, 0, 0, 0, 0, 0) + "\n"
+                + card5 + "\n"
+                + F(1000.0, 2000.0, 30.0, 40.0, 50.0, 54.0, 0.0) + "\n*END\n")
+
+    def test_mat_054_stresses_lengths_and_alph(self):
+        lines, ctx = self._conv(
+            self._comp(F(0.0, "1.5000E-9", 1.0, 0.0, 2.0, 0.0, 0.0, 0.0)))
+        i = lines.index("*MAT_ENHANCED_COMPOSITE_DAMAGE_TITLE")
+        fp = float(factor(PRESSURE, self.SLIN, TON))
+        fl = float(factor(LENGTH, self.SLIN, TON))
+        self.assertAlmostEqual(float(lines[i + 2][20:30]) / (147000.0 * fp), 1.0)
+        self.assertAlmostEqual(float(lines[i + 3][0:10]) / (3960.0 * fp), 1.0)
+        self.assertAlmostEqual(float(lines[i + 4][0:10]) / fl, 1.0)
+        self.assertAlmostEqual(float(lines[i + 7][0:10]) / (1000.0 * fp), 1.0)
+        # ALPH is 1/stress^3, not the 0..1 weight it is often mistaken for
+        self.assertAlmostEqual(
+            float(lines[i + 6][10:20]) / (1.5e-9 * fp ** -3), 1.0, places=5)
+
+    def test_mat_054_tfail_time_band(self):
+        # slinch-in-s -> ton-mm-s leaves time alone, so a small TFAIL survives
+        lines, ctx = self._conv(
+            self._comp(F(0.05, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.0)))
+        i = lines.index("*MAT_ENHANCED_COMPOSITE_DAMAGE_TITLE")
+        self.assertAlmostEqual(float(lines[i + 6][0:10]), 0.05)
+
+    def test_mat_054_tfail_crossing_the_ratio_band_refused(self):
+        # ton-mm-s -> kg-mm-ms multiplies times by 1000, pushing 0.05 to 50,
+        # where the same column means a time-step RATIO instead
+        deck = self._comp(F(0.05, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.0))
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "TFAIL"):
+            convert(p, TON, KGMM, p + ".o.k", self_check=False)
+
+    def test_mat_054_tfail_ratio_band_untouched(self):
+        deck = self._comp(F(2.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 0.0))
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, TON, KGMM, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*MAT_ENHANCED_COMPOSITE_DAMAGE_TITLE")
+        self.assertAlmostEqual(float(lines[i + 6][0:10]), 2.0)
+
+    RUBBER = ("*KEYWORD\n*MAT_SIMPLIFIED_RUBBER/FOAM_TITLE\nsilicone\n"
+              + F(1, "1.00000E-4", 100000.0, 0.0, 250.0, 1.0, 0.0, 0.0) + "\n"
+              + F(1.0, 1.0, 1.0, 2, 0.0, 0.0, 0.0, 0.0) + "\n"
+              "*DEFINE_CURVE\n" + F(2, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+              + F("-0.89", w=20) + F("-1067.655", w=20) + "\n"
+              + F("0.5", w=20) + F("500.0", w=20) + "\n*END\n")
+
+    def test_mat_181_slashed_keyword_resolves(self):
+        lines, ctx = self._conv(self.RUBBER)
+        self.assertEqual(ctx.unknown, {})
+        self.assertIn("MAT_SIMPLIFIED_RUBBER/FOAM_TITLE", ctx.counts)
+
+    def test_mat_181_specimen_lengths_and_force_curve(self):
+        lines, ctx = self._conv(self.RUBBER)
+        i = lines.index("*MAT_SIMPLIFIED_RUBBER/FOAM_TITLE")
+        fp = float(factor(PRESSURE, self.SLIN, TON))
+        fl = float(factor(LENGTH, self.SLIN, TON))
+        ff = float(factor(FORCE, self.SLIN, TON))
+        self.assertAlmostEqual(float(lines[i + 2][20:30]) / (100000.0 * fp), 1.0)
+        self.assertAlmostEqual(float(lines[i + 2][40:50]) / (250.0 * fp), 1.0)
+        for sl in (slice(0, 10), slice(10, 20), slice(20, 30)):
+            self.assertAlmostEqual(float(lines[i + 3][sl]) / fl, 1.0)
+        j = lines.index(F(2, 0, 1.0, 1.0, 0.0, 0.0, 0, 0))
+        self.assertAlmostEqual(float(lines[j + 1][0:20]) / (-0.89 * fl), 1.0)
+        self.assertAlmostEqual(
+            float(lines[j + 1][20:40]) / (-1067.655 * ff), 1.0)
+
+    def test_mat_181_negative_pr_is_a_rate(self):
+        deck = self.RUBBER.replace(F(1.0, 1.0, 1.0, 2, 0.0, 0.0, 0.0, 0.0),
+                                   F(1.0, 1.0, 1.0, 2, 0.0, 0.0, -0.002, -50.0))
+        lines, ctx = self._conv(deck, src=KGMM)
+        i = lines.index("*MAT_SIMPLIFIED_RUBBER/FOAM_TITLE")
+        # kg-mm-ms -> ton-mm-s: times x1e-3, rates x1e3
+        self.assertAlmostEqual(float(lines[i + 3][60:70]), -2e-6)     # AVGOPT
+        self.assertAlmostEqual(float(lines[i + 3][70:80]), -50000.0)  # PR
+
+
+class FabricTests(unittest.TestCase):
+    """*MAT_FABRIC / MAT_034 (R16 Vol II p.2-312), slinch-in-s -> ton-mm-s."""
+
+    SLIN = parse_system("slinch-in-s")
+
+    def _deck(self, card3=None, card5=None):
+        card3 = card3 or F(0.0, 0.0, 0.0, 0.0, 0.0, 0, 0, 0.0)
+        card5 = card5 or F("", 0.0, 0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        return ("*KEYWORD\n*MAT_FABRIC\n"
+                + F(3, "1.00000E-4", 2000000, 2000000, "", 0.35, 0.35, "") + "\n"
+                + F(1530000, "", "", 0.0, 90000.0, 0.0, 0.1, 0.0) + "\n"
+                + card3 + "\n" + card5 + "\n"
+                + F(0.0, 0.0, 0.0, "", "", "", 0.0, 0) + "\n*END\n")
+
+    def _conv(self, deck, **kw):
+        p = _write(deck)
+        out = p + ".o.k"
+        ctx = convert(p, self.SLIN, TON, out, self_check=False, **kw)
+        return _lines(out), ctx
+
+    def test_mat_fabric_moduli_are_stresses(self):
+        lines, ctx = self._conv(self._deck())
+        i = lines.index("*MAT_FABRIC")
+        fp = float(factor(PRESSURE, self.SLIN, TON))
+        self.assertAlmostEqual(float(lines[i + 1][20:30]) / (2000000 * fp), 1.0)
+        self.assertAlmostEqual(float(lines[i + 2][0:10]) / (1530000 * fp), 1.0)
+        self.assertAlmostEqual(float(lines[i + 2][40:50]) / (90000.0 * fp), 1.0)
+        self.assertAlmostEqual(float(lines[i + 2][60:70]), 0.1)   # LRATIO stays
+
+    def test_mat_fabric_rgbrth_is_a_time(self):
+        deck = self._deck(card5=F("", 0.002, 0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, KGMM, TON, out, self_check=False)
+        lines = _lines(out)
+        i = lines.index("*MAT_FABRIC")
+        self.assertAlmostEqual(float(lines[i + 4][10:20]), 2e-6)
+
+    def test_mat_fabric_nonzero_flc_refused(self):
+        deck = self._deck(card3=F(0.0, 0.35, 0.0, 0.0, 0.0, 0, 0, 0.0))
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "FLC"):
+            convert(p, self.SLIN, TON, p + ".o.k", self_check=False)
+
+    def test_mat_fabric_x2_x3_in_the_same_columns_are_fine(self):
+        # 0 < X0 < 1 makes fields 2-3 the dimensionless porosity coefficients
+        deck = self._deck(card3=F(0.0, 0.35, 0.2, 0.0, 0.0, 0, 0, 0.0),
+                          card5=F("", 0.0, 0, 0.0, 0.0, 0.0, 0.5, 0.0))
+        lines, ctx = self._conv(deck)
+        i = lines.index("*MAT_FABRIC")
+        self.assertAlmostEqual(float(lines[i + 3][10:20]), 0.35)
+        self.assertAlmostEqual(float(lines[i + 3][20:30]), 0.2)
+
+    def test_mat_fabric_fvopt_negative_refused(self):
+        deck = self._deck(card3=F(0.0, 0.0, 0.0, 0.0, 0.0, 0, -7, 0.0))
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "FVOPT"):
+            convert(p, self.SLIN, TON, p + ".o.k", self_check=False)
+
+    def test_mat_fabric_form_minus14_refused(self):
+        deck = self._deck(card3=F(0.0, 0.0, 0.0, 0.0, 0.0, -14, 0, 0.0))
+        p = _write(deck)
+        with self.assertRaisesRegex(ConvertError, "FORM=-14"):
+            convert(p, self.SLIN, TON, p + ".o.k", self_check=False)
+
+    def test_mat_fabric_form14_curves_are_stress_vs_strain(self):
+        deck = self._deck(card3=F(0.0, 0.0, 0.0, 0.0, 0.0, 14, 0, 0.0))
+        deck = deck.replace("*END", F(11, 0, 0, 0, 0, 0, 0.0) + "\n"
+                            "*DEFINE_CURVE\n"
+                            + F(11, 0, 1.0, 1.0, 0.0, 0.0, 0, 0) + "\n"
+                            + F("0.0", w=20) + F("0.0", w=20) + "\n"
+                            + F("0.1", w=20) + F("50000.0", w=20) + "\n*END")
+        lines, ctx = self._conv(deck)
+        fp = float(factor(PRESSURE, self.SLIN, TON))
+        j = lines.index(F(11, 0, 1.0, 1.0, 0.0, 0.0, 0, 0))
+        self.assertAlmostEqual(float(lines[j + 2][0:20]), 0.1)      # strain
+        self.assertAlmostEqual(float(lines[j + 2][20:40]) / (50000.0 * fp), 1.0)

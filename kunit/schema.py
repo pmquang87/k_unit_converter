@@ -30,7 +30,8 @@ from .units import (ACCEL, ACCEL_PSD, ACOUST_IMP, ANG_ACCEL, ANG_VEL, AREA, DAMP
                     LENGTH,
                     MASS, MASS_AREA, MASS_LEN, MOMENT, POWER, PRES_PSD,
                     PRESSURE, PWR_VOL, RATE,
-                    ROT_DAMP, SPEC_HEAT, STIFF, STIFF_LEN, STRESS_M3, TEMP,
+                    ROT_DAMP, SPEC_HEAT, STIFF, STIFF_LEN, STRESS_M3,
+                    STRESS_SQ, TEMP,
                     THERM_COND, TIME, VEL_PSD, VELOCITY, VISCOSITY, VOLUME,
                     BEM_UNITS, BEM_UNIT_SYSTEMS,
                     BLAST_BUILTIN_UNITS, BLAST_UNIT_SYSTEMS, CSCM_UNITS,
@@ -105,6 +106,24 @@ SPECS: Dict[str, Spec] = {
     "SECTION_SHELL": Spec(cards=[
         C(),
         C({0: LENGTH, 1: LENGTH, 2: LENGTH, 3: LENGTH, 5: MASS_AREA})]),
+    # R16 Vol II p.2-170..2-173 (*MAT_SOIL_AND_FOAM / MAT_005): six cards,
+    # none optional.  Card 1 MID RO G KUN A0 A1 A2 PC (LS-PrePost labels KUN
+    # "bulk"); Card 2 VCR REF LCID; Cards 3-4 the ten volumetric strains
+    # EPS1-EPS10 ("the natural log of the relative volume", dimensionless);
+    # Cards 5-6 the ten pressures P1-P10.
+    #
+    # A0/A1/A2 do NOT share a dimension.  Remark 2 gives the yield surface as
+    # phi = J2 - [a0 + a1 p + a2 p^2] with "J2 = 1/2 s_ij s_ij", a product of
+    # two stresses, so the bracket is a stress^2: a0 is STRESS_SQ, a1 a plain
+    # stress and a2 dimensionless.  The degenerate von-Mises case in the same
+    # remark ("set a1 = a2 = 0 and a0 = 1/3 sigma_y^2") confirms it.
+    "MAT_SOIL_AND_FOAM": Spec(
+        cards=[C({1: DENSITY, 2: PRESSURE, 3: PRESSURE, 4: STRESS_SQ,
+                  5: PRESSURE, 7: PRESSURE}),
+               C(), C(), C(),
+               C({i: PRESSURE for i in range(8)}),
+               C({0: PRESSURE, 1: PRESSURE})],
+        curves=[(1, 2, DIMLESS, PRESSURE)]),
     "SECTION_SOLID": Spec(cards=[C()], extra_ok=True),
     # R16 Vol I p.41-52..41-57 (*SECTION_POINT_SOURCE_MIXTURE): Card 1 SECID
     # LCIDT - LCIDVEL NIDLC1-3 IDIR, Card 2 LCMD1-8, then one repeating
@@ -706,6 +725,12 @@ _MAT_ALIASES = {
     "MAT_031": "MAT_FRAZER_NASH_RUBBER_MODEL",
     "MAT_090": "MAT_ACOUSTIC",
     "MAT_102": "MAT_INV_HYPERBOLIC_SIN",
+    "MAT_034": "MAT_FABRIC",
+    # R16 Vol II p.2-201: *MAT_SOIL_AND_FOAM_FAILURE "input for this
+    # model is the same as *MATERIAL_SOIL_AND_FOAM (Type 5)" - it only
+    # adds tensile-failure behaviour, no card of its own.
+    "MAT_005": "MAT_SOIL_AND_FOAM", "MAT_014": "MAT_SOIL_AND_FOAM_FAILURE",
+    "MAT_SOIL_AND_FOAM_FAILURE": "MAT_SOIL_AND_FOAM",
     "MAT_148": "MAT_GAS_MIXTURE",
     # R16 Vol II p.2-2000: *MAT_ALE_GAS_MIXTURE is "exactly the same as
     # *MAT_GAS_MIXTURE or *MAT_148".  Its _ADV spelling is NOT - it swaps PDV
@@ -1852,6 +1877,234 @@ def h_mat_thermal_isotropic(block: Block, ctx, edit: bool) -> None:
         ctx.warn(f"*{block.name}: {len(data) - 2} trailing card(s) beyond the "
                  "2-card layout left unscaled - the _TD, _TD_LC and "
                  "_PHASE_CHANGE variants are separate keywords; verify.")
+    ctx.count(block.name)
+
+
+def h_mat_fabric(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol II p.2-312..2-338 (*MAT_FABRIC / MAT_034).
+
+    Card 1 MID RO EA EB - PRBA PRAB, Card 2 GAB - - CSE EL PRL LRATIO DAMP,
+    Card 3 AOPT FLC/X2 FAC/X3 ELA LNRC FORM FVOPT TSRFAC, Card 5 - RGBRTH
+    A0REF A1 A2 A3 X0 X1, Card 6 V1 V2 V3 - - - BETA ISREFG.  Every "modulus"
+    in this material is a STRESS for every FORM value - EA/EB are "Young's
+    modulus - longitudinal / transverse direction", GAB the "shear modulus in
+    the ab direction", EL the liner's Young's modulus - so there is no
+    force-per-unit-width branch to detect.  RGBRTH is the reference-geometry
+    birth TIME.  A1-A3 / V1-V3 are directions and BETA an angle in degrees.
+
+    Three things make this keyword refuse rather than guess:
+
+    * FLC and FAC (Card 3 fields 2-3, when X0 is 0, -1 or 1) are defined only
+      as "optional porous leakage flow coefficient" / "optional characteristic
+      fabric parameter. (See theory manual.)"  Neither volume of R16 states
+      their units anywhere, and for FVOPT >= 7 the FAC *curve ordinate* is
+      explicitly a "leakage volume flux rate ... equivalent to relative porous
+      gas speed", i.e. a VELOCITY - so the scalar cannot simply be assumed
+      dimensionless either.  Nonzero values are refused.
+      (For 0 < X0 < 1 the same two columns are X2/X3, dimensionless porosity
+      coefficients in A_leak = A0(X0 + X1 rs + X2 rp + X3 rs rp) - safe.)
+    * FVOPT < 0 adds Card 4 L R C1 C2 C3, whose C1 is only described as
+      "pressure coefficient (dependent on unit system)".  Remark 16 makes
+      (C1 dp^C2 - C3) dimensionless, so C1 carries pressure^(-C2) - a
+      data-dependent dimension that also shifts every later card.  Refused.
+    * FORM = -14 turns LCA/LCB into *DEFINE_TABLEs and adds a coating Card 8.
+      Refused; FORM = 4, 14 and 24 (plain stress-strain curves on Card 7) are
+      handled.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 5:
+        ctx.error(f"*{block.name}: {len(data)} data cards, but the keyword "
+                  "always has at least 5 (R16 Vol II p.2-312) - refusing.")
+        return
+    form = _numint(kf, data[2], STD8, block.long, 5) or 0
+    fvopt = _numint(kf, data[2], STD8, block.long, 6) or 0
+    # Card 4 only exists for FVOPT < 0 (refused below), so the five cards
+    # present are 1, 2, 3, 5, 6 - the manual's "Card 5" is data[3].
+    x0 = kf.get_number(data[3], STD8, block.long, 6) or 0
+    if fvopt < 0:
+        ctx.error(f"*{block.name}: FVOPT={fvopt} adds the St. Venant-Wantzel "
+                  "Card 4, whose C1 is only 'dependent on unit system' "
+                  "(R16 Vol II p.2-327) - it carries pressure^(-C2) and "
+                  "shifts every later card. Convert this fabric manually.")
+        return
+    if form == -14:
+        ctx.error(f"*{block.name}: FORM=-14 makes LCA/LCB *DEFINE_TABLE ids "
+                  "and adds the coating Card 8 (R16 Vol II p.2-330..2-332) - "
+                  "layout not modelled, convert manually.")
+        return
+    if not (0 < x0 < 1):
+        for fi, nm in ((1, "FLC"), (2, "FAC")):
+            if kf.get_number(data[2], STD8, block.long, fi):
+                ctx.error(
+                    f"*{block.name}: {nm} is nonzero, and R16 defines it only "
+                    f"as an 'optional {'porous leakage flow' if fi == 1 else 'characteristic fabric'}"
+                    f" parameter. (See theory manual.)' (Vol II p.2-320) - "
+                    "its units are stated nowhere, so it cannot be rescaled "
+                    "or safely left alone. Convert this fabric manually.")
+                return
+    if not edit:
+        ela = kf.get_number(data[2], STD8, block.long, 3)
+        tsr = kf.get_number(data[2], STD8, block.long, 7)
+        if ela and ela < 0:              # effective leakage area vs time
+            ctx.register_curve(int(-ela), TIME, DIMLESS, block.name + " ELA")
+        if tsr and (tsr < 0 or tsr >= 1):   # strain-restoration factor vs time
+            ctx.register_curve(int(abs(tsr)), TIME, DIMLESS,
+                               block.name + " TSRFAC")
+        if len(data) > 5:                # Card 7: stress as a function of strain
+            for fi in range(6):
+                lc = _numint(kf, data[5], STD8, block.long, fi)
+                if lc:
+                    ctx.register_curve(abs(lc), DIMLESS, PRESSURE,
+                                       block.name + " Card 7")
+        return
+    for fi in (1, 2, 3):                                       # RO EA EB
+        kf.scale_field(data[0], STD8, block.long, fi,
+                       ctx.fac(DENSITY if fi == 1 else PRESSURE))
+    kf.scale_field(data[1], STD8, block.long, 0, ctx.fac(PRESSURE))   # GAB
+    kf.scale_field(data[1], STD8, block.long, 4, ctx.fac(PRESSURE))   # EL
+    kf.scale_field(data[3], STD8, block.long, 1, ctx.fac(TIME))       # RGBRTH
+    if len(data) > 6:
+        ctx.warn(f"*{block.name}: {len(data) - 6} trailing card(s) beyond "
+                 "Card 7 left unscaled - verify.")
+    ctx.count(block.name)
+
+
+def h_mat_enhanced_composite_damage(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol II p.2-419..2-436 (*MAT_ENHANCED_COMPOSITE_DAMAGE, MAT_054/055).
+
+    Six required cards, then up to three optional ones when CRIT = 54:
+      1 MID RO EA EB EC PRBA PRCA PRCB
+      2 GAB GBC GCA (KF) AOPT 2WAY TI
+      3 XP YP ZP A1 A2 A3 MANGLE          - XP/YP/ZP are a point, so LENGTHs
+      4 V1 V2 V3 D1 D2 D3 [DFAILM DFAILS] - directions and failure STRAINS
+      5 TFAIL ALPH SOFT FBRT YCFAC DFAILT DFAILC EFS
+      6 XC XT YC YT SC CRIT BETA          - strengths, i.e. stresses
+      7 PFL EPSF EPSR TSMD SOFT2          - strains and factors
+      8 SLIMT1..SLIMS NCYRED SOFTG        - factors
+      9 LCXC LCXT LCYC LCYT LCSC DT       - strength as a function of strain rate
+
+    ALPH is the same nonlinear-shear term as *MAT_022's ("see *MAT_022",
+    p.2-424), which p.2-249 gives "in units of [stress^-3]" - a field that is
+    easy to mistake for the 0..1 weight BETA on Card 6 and silently drop.
+
+    TFAIL is the trap.  Its meaning switches on the VALUE, at 0.1:
+    "GT.0.0.and.LE.0.1: element is deleted when its time step is smaller than
+    the given value" but "GT.0.1: ... the quotient of the actual time step and
+    the original time step".  So it is a TIME in the first band and a ratio in
+    the second, and a conversion that pushes a time across 0.1 would silently
+    turn it into a ratio - that case is refused rather than written out.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 6:
+        ctx.error(f"*{block.name}: {len(data)} data cards, but Cards 1-6 are "
+                  "always required (R16 Vol II p.2-420) - refusing.")
+        return
+    if not edit:
+        if len(data) > 8:                       # Card 9 (rate-dependent)
+            for fi in range(5):
+                lc = _numint(kf, data[8], STD8, block.long, fi)
+                if lc:
+                    ctx.register_curve(lc, RATE, PRESSURE,
+                                       block.name + " strength(strain rate)")
+        return
+    for fi in (1, 2, 3, 4):                                    # RO EA EB EC
+        kf.scale_field(data[0], STD8, block.long, fi,
+                       ctx.fac(DENSITY if fi == 1 else PRESSURE))
+    for fi in range(4):                                        # GAB GBC GCA KF
+        kf.scale_field(data[1], STD8, block.long, fi, ctx.fac(PRESSURE))
+    for fi in range(3):                                        # XP YP ZP
+        kf.scale_field(data[2], STD8, block.long, fi, ctx.fac(LENGTH))
+    kf.scale_field(data[4], STD8, block.long, 1, ctx.fac(STRESS_M3))   # ALPH
+    tfail = kf.get_number(data[4], STD8, block.long, 0)
+    if tfail is not None and 0 < tfail <= Decimal("0.1"):
+        ft = ctx.fac(TIME)
+        if Fraction(tfail) * ft > Fraction(1, 10):
+            ctx.error(
+                f"*{block.name}: TFAIL={tfail} is a time-step threshold "
+                "(R16 Vol II p.2-424: 'GT.0.0.and.LE.0.1'), but rescaling it "
+                f"by {ft} puts it above 0.1, where the same field means a "
+                "time-step RATIO instead. Set TFAIL manually in the target "
+                "units.")
+            return
+        kf.scale_field(data[4], STD8, block.long, 0, ft)
+    for fi in range(5):                                        # XC XT YC YT SC
+        kf.scale_field(data[5], STD8, block.long, fi, ctx.fac(PRESSURE))
+    if len(data) > 8:
+        dt = kf.get_number(data[8], STD8, block.long, 5)
+        if dt and dt > 0:                # strain-rate averaging window
+            kf.scale_field(data[8], STD8, block.long, 5, ctx.fac(TIME))
+    if len(data) > 9:
+        ctx.warn(f"*{block.name}: {len(data) - 9} trailing card(s) beyond "
+                 "Card 9 left unscaled - verify.")
+    ctx.count(block.name)
+
+
+def h_mat_simplified_rubber_foam(block: Block, ctx, edit: bool) -> None:
+    """R16 Vol II p.2-1210..2-1218 (*MAT_SIMPLIFIED_RUBBER/FOAM, MAT_181).
+    The keyword name really does carry a slash; the parser keeps it because
+    it splits keyword lines on whitespace, not on punctuation.
+
+    Card 1 MID RO KM MU G SIGF REF PRTEN, Card 2 SGL SW ST LC/TBID TENSION
+    RTYPE AVGOPT PR, optional Card 4 LCUNLD HU SHAPE STOL VISCO HISOUT and
+    optional Card 5 (up to 12) Gi BETAi VFLAG.
+
+    The curve is the interesting part.  The manual defines it once and
+    unconditionally: LC gives "the force as a function of the actual change
+    in the gauge length", and only *if* SGL, SW and ST are all 1.0 is it
+    *also* readable as engineering stress against engineering strain.  So the
+    honest axes are (LENGTH, FORCE), and scaling SGL/SW/ST as the lengths
+    they are keeps that self-consistent: LS-DYNA forms eps = dl/SGL (both
+    lengths, unchanged) and sigma = F/(SW*ST) (a stress, correctly scaled).
+    A deck written with the unity-specimen idiom therefore comes out with
+    SGL = SW = ST = 25.4 after in -> mm, which looks odd but is right.
+
+    Two sign-switched fields: AVGOPT < 0 is "a time window/interval over
+    which the strain rates are averaged", and PR < 0 is not a Poisson ratio
+    at all but the viscosity coefficient beta of p^{n+1} = p^n exp(-beta dt)
+    ..., i.e. a RATE.
+
+    Only the bare and _TITLE spellings route here.  _WITH_FAILURE inserts its
+    own Card 3 and _LOG_LOG_INTERPOLATION is a separate entry, so both stay
+    unknown rather than being silently given this layout.
+    """
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 2:
+        ctx.error(f"*{block.name}: {len(data)} data cards, but Cards 1-2 are "
+                  "always required (R16 Vol II p.2-1210) - refusing.")
+        return
+    lc = _numint(kf, data[1], STD8, block.long, 3)
+    if not edit:
+        if lc:
+            ctx.register_curve(lc, LENGTH, FORCE,
+                               block.name + " force(gauge length change)")
+            # LC/TBID: the same field names a *DEFINE_TABLE whose own values
+            # are strain rates; registering both is harmless because only the
+            # matching keyword ever consumes the registration.
+            ctx.register_table(lc, RATE, LENGTH, FORCE)
+        if len(data) > 2:
+            lcu = _numint(kf, data[2], STD8, block.long, 0)
+            if lcu:
+                ctx.register_curve(lcu, LENGTH, FORCE,
+                                   block.name + " unloading force(length)")
+        return
+    for fi, dim in ((1, DENSITY), (2, PRESSURE), (4, PRESSURE), (5, PRESSURE)):
+        kf.scale_field(data[0], STD8, block.long, fi, ctx.fac(dim))
+    for fi in range(3):                                        # SGL SW ST
+        kf.scale_field(data[1], STD8, block.long, fi, ctx.fac(LENGTH))
+    avgopt = kf.get_number(data[1], STD8, block.long, 6)
+    if avgopt and avgopt < 0:
+        kf.scale_field(data[1], STD8, block.long, 6, ctx.fac(TIME))
+    pr = kf.get_number(data[1], STD8, block.long, 7)
+    if pr and pr < 0:
+        kf.scale_field(data[1], STD8, block.long, 7, ctx.fac(RATE))
+    for li in data[3:]:                                   # Prony series cards
+        vflag = _numint(kf, li, STD8, block.long, 2) or 0
+        if not vflag:      # VFLAG=1 -> normalised moduli, dimensionless
+            kf.scale_field(li, STD8, block.long, 0, ctx.fac(PRESSURE))  # Gi
+        kf.scale_field(li, STD8, block.long, 1, ctx.fac(RATE))          # BETAi
     ctx.count(block.name)
 
 
@@ -4087,6 +4340,9 @@ CUSTOM: Dict[str, Callable] = {
     "MAT_SPOTWELD": h_mat_spotweld,
     "MAT_THERMAL_ISOTROPIC": h_mat_thermal_isotropic,
     "MAT_GAS_MIXTURE": h_mat_gas_mixture,
+    "MAT_FABRIC": h_mat_fabric,
+    "MAT_ENHANCED_COMPOSITE_DAMAGE": h_mat_enhanced_composite_damage,
+    "MAT_SIMPLIFIED_RUBBER/FOAM": h_mat_simplified_rubber_foam,
     "ICFD_BOUNDARY_PRESCRIBED_VEL": h_icfd_prescribed_vel,
     "ICFD_BOUNDARY_PRESCRIBED_PRE": h_icfd_prescribed_pre,
     "ICFD_BOUNDARY_PRESCRIBED_TEMP": h_icfd_prescribed_temp,
