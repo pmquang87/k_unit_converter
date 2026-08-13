@@ -2522,3 +2522,185 @@ class CustomProbeTests(unittest.TestCase):
         from kunit.schema import CUSTOM_PROBES, resolve
         for name in CUSTOM_PROBES:
             self.assertEqual(resolve(name)[0], "custom", name)
+
+
+GCMUS = parse_system("g-cm-us")
+
+
+class CorpusAuditRegressionTests(unittest.TestCase):
+    """Regressions from the 2026-08 dynaexamples ton-mm-s corpus audit.
+
+    Two decks passed all input checks but collapsed the explicit timestep
+    at run time; both traced to conversion defects (field values quoted
+    verbatim from the offending decks):
+      * ale-s-ale/s-ale/wavestructure/2Dlag.k (kg-mm-ms): the ideal-gas
+        air *EOS_LINEAR_POLYNOMIAL had C4=C5=0.4 (= gamma-1, dimensionless)
+        scaled by the pressure factor 1000 -> 400.
+      * sph/bar-i/bar1.k (g-cm-us): a 2D plane-strain SPH deck
+        (*CONTROL_SPH IDIM=2, all particles in one plane); *ELEMENT_SPH
+        MASS is mass PER UNIT LENGTH there, so the factor is
+        mass/length = 1e-7, not the 3D mass factor 1e-6.
+    """
+
+    def test_eos_linear_polynomial_c4_c6_dimensionless(self):
+        # p = C0 + C1*mu + C2*mu^2 + C3*mu^3 + (C4 + C5*mu + C6*mu^2)*E:
+        # E is energy per reference volume (pressure units), so C4..C6 are
+        # dimensionless and only C0..C3 and E0 carry pressure units.
+        deck = ("*KEYWORD\n*EOS_LINEAR_POLYNOMIAL\n"
+                + F(3, 0.0, 2.2, 0.0, 0.0, 0.4, 0.4, 0.28) + "\n"
+                + F("2.50000E-4", 1.0) + "\n*END\n")
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, KGMM, TON, out, self_check=False)
+        lines = _lines(out)
+        c1 = lines[lines.index("*EOS_LINEAR_POLYNOMIAL") + 1]
+        self.assertAlmostEqual(float(c1[20:30]), 2200.0)     # C1 GPa -> MPa
+        self.assertAlmostEqual(float(c1[50:60]), 0.4)        # C4 unscaled
+        self.assertAlmostEqual(float(c1[60:70]), 0.4)        # C5 unscaled
+        self.assertAlmostEqual(float(c1[70:80]), 0.28)       # C6 unscaled
+        c2 = lines[lines.index("*EOS_LINEAR_POLYNOMIAL") + 2]
+        self.assertAlmostEqual(float(c2[0:10]), 0.25)        # E0 x1000
+        self.assertAlmostEqual(float(c2[10:20]), 1.0)        # V0 unscaled
+
+    SPH2D = ("*KEYWORD\n"
+             "*CONTROL_SPH\n"
+             + F(1, 0, 0.0, 2, 0, 0, 0.0, 0.0) + "\n"
+             "*SECTION_SPH\n"
+             + F(101, 1.1, 0.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+             "*ELEMENT_SPH\n"
+             " 1000001     101      0.00300000\n"
+             " 1000002     101     -0.00111111\n"
+             "*END\n")
+
+    def test_element_sph_2d_plane_strain_mass_per_length(self):
+        # bar1.k geometry: rho 2.7 g/cm3, grid 0.0333 cm -> MASS
+        # 0.003 = rho*dx*dy is mass per unit thickness (g/cm), factor
+        # 1e-6/10 = 1e-7; a negative value is a VOLUME per unit
+        # thickness, i.e. an area (x100).
+        p = _write(self.SPH2D)
+        out = p + ".o.k"
+        convert(p, GCMUS, TON, out, self_check=False)
+        lines = _lines(out)
+        ei = lines.index("*ELEMENT_SPH")
+        self.assertAlmostEqual(float(lines[ei + 1][16:32]) / 3.0e-10, 1.0,
+                               places=5)
+        self.assertAlmostEqual(float(lines[ei + 2][16:32]) / -0.111111, 1.0,
+                               places=5)
+
+    def test_element_sph_2d_axisymmetric_same_factor(self):
+        # IDIM=-2 (axisymmetric): the input MASS field is rho*A - the SAME
+        # M/L dimensions as plane strain (the d3hsp "mass per radian"
+        # rho*A*x is only a printout, not the input).  Verified against
+        # R14.1.1 solver behavior in the 2026-08 audit.
+        deck = self.SPH2D.replace(
+            F(1, 0, 0.0, 2, 0, 0, 0.0, 0.0), F(1, 0, 0.0, -2, 0, 0, 0.0, 0.0))
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, GCMUS, TON, out, self_check=False)
+        lines = _lines(out)
+        ei = lines.index("*ELEMENT_SPH")
+        self.assertAlmostEqual(float(lines[ei + 1][16:32]) / 3.0e-10, 1.0,
+                               places=5)
+        self.assertAlmostEqual(float(lines[ei + 2][16:32]) / -0.111111, 1.0,
+                               places=5)
+
+    def test_element_sph_3d_mass_unchanged_semantics(self):
+        # IDIM=3 (or absent CONTROL_SPH) keeps the plain 3D mass factor
+        deck = self.SPH2D.replace(
+            F(1, 0, 0.0, 2, 0, 0, 0.0, 0.0), F(1, 0, 0.0, 3, 0, 0, 0.0, 0.0))
+        p = _write(deck)
+        out = p + ".o.k"
+        convert(p, GCMUS, TON, out, self_check=False)
+        lines = _lines(out)
+        ei = lines.index("*ELEMENT_SPH")
+        self.assertAlmostEqual(float(lines[ei + 1][16:32]) / 3.0e-9, 1.0,
+                               places=5)
+        self.assertAlmostEqual(float(lines[ei + 2][16:32]) / -1.11111, 1.0,
+                               places=5)
+
+
+class ControlAleCardTests(unittest.TestCase):
+    """*CONTROL_ALE Cards 3-4, R16 Vol I p.12-51..12-59.
+
+    Card 3 NCPL NBKT IMASCL CHECKR BEAMIN MMGPREF PDIFMX DTMUFAC and Card 4
+    OPTIMPP IALEDR BNDFLX MINMAS used to fall through unscaled behind
+    extra_ok.  PDIFMX is "maximum of pressure difference between neighboring
+    ALE elements" (p.12-55) and so crossed unit systems unchanged; every
+    other field on those two cards is a count, a flag, an id or a
+    dimensionless factor and must stay byte-for-byte untouched.
+
+    Layout and values taken from the R14 dynaexamples deck
+    ale-s-ale/s-ale/wavestructure/2Dlag.k (kg-mm-ms), with CHECKR, BEAMIN,
+    PDIFMX, DTMUFAC and BNDFLX set nonzero so a wrong factor is visible.
+    Card 2 is reproduced verbatim: START/END and EBC/PREF run together with
+    no separator, which only the 10-char fixed-width slotting resolves.
+    """
+
+    DECK = ("*KEYWORD\n"
+            "*CONTROL_ALE\n"
+            + F(-1, 1, 2, -1.0, 0.0, 0.0, 0.0, 0.0) + "\n"
+            "       0.01.00000E20       1.01.00000E-6         0"
+            "         01.00000E-4         0\n"
+            + F(1, 50, 0, 0.05, 1.0, 0, 0.001, 2.0) + "\n"
+            "         0         0         31.00000E-5\n"
+            "*END\n")
+
+    def _run(self, deck=None):
+        p = _write(deck or self.DECK)
+        ctx = convert(p, KGMM, TON, p + ".o.k", self_check=False)
+        lines = _lines(p + ".o.k")
+        i = lines.index("*CONTROL_ALE")
+        return ctx, lines[i + 1:i + 5]
+
+    def test_control_ale_pdifmx_is_a_pressure(self):
+        # p.12-55: PDIFMX is a pressure difference between ALE elements,
+        # so it rescales with stress: 0.001 GPa -> 1.0 MPa.
+        _ctx, cards = self._run()
+        self.assertAlmostEqual(float(cards[2][60:70]), 1.0)
+
+    def test_control_ale_card3_dimensionless_fields_untouched(self):
+        # NCPL/NBKT cycle counts (p.12-54), IMASCL flag (p.12-54), CHECKR
+        # diffusive-flux scale 0.01..0.1 (p.12-55 + Remark 9), BEAMIN 0.0/1.0
+        # flag, MMGPREF flag/curve id, DTMUFAC time-step scale factor.
+        _ctx, cards = self._run()
+        c3 = cards[2]
+        self.assertEqual(int(c3[0:10]), 1)                  # NCPL
+        self.assertEqual(int(c3[10:20]), 50)                # NBKT
+        self.assertEqual(int(c3[20:30]), 0)                 # IMASCL
+        self.assertAlmostEqual(float(c3[30:40]), 0.05)      # CHECKR
+        self.assertAlmostEqual(float(c3[40:50]), 1.0)       # BEAMIN
+        self.assertEqual(int(c3[50:60]), 0)                 # MMGPREF
+        self.assertAlmostEqual(float(c3[70:80]), 2.0)       # DTMUFAC
+
+    def test_control_ale_card4_minmas_is_a_fraction(self):
+        # p.12-56: MINMAS is a "factor of the minimum mass allowed in an
+        # element", MINMAS x initial density x material volume - a pure
+        # ratio, so the 1e-5 default must survive verbatim, not x0.001.
+        _ctx, cards = self._run()
+        c4 = cards[3]
+        self.assertEqual(c4[30:40], "1.00000E-5")           # MINMAS
+        self.assertEqual(int(c4[0:10]), 0)                  # OPTIMPP flag
+        self.assertEqual(int(c4[10:20]), 0)                 # IALEDR flag
+        self.assertEqual(int(c4[20:30]), 3)                 # BNDFLX set id
+
+    def test_control_ale_merged_card2_fields_stay_aligned(self):
+        # "       0.01.00000E20" is two 10-char slots with no separator;
+        # modelling cards 3-4 must not disturb the earlier cards.
+        _ctx, cards = self._run()
+        c2 = cards[1]
+        self.assertAlmostEqual(float(c2[0:10]), 0.0)            # START
+        self.assertAlmostEqual(float(c2[10:20]) / 1e17, 1.0)    # END ms -> s
+        self.assertAlmostEqual(float(c2[20:30]), 1.0)           # AAFAC
+        self.assertAlmostEqual(float(c2[30:40]), 1.0e-6)        # VFACT
+        self.assertAlmostEqual(float(c2[60:70]), 0.1)           # PREF GPa->MPa
+
+    def test_control_ale_fifth_card_is_flagged(self):
+        # R16 documents Cards 1-4 and nothing else, so extra_ok is gone:
+        # four cards convert silently, a fifth is a real anomaly.
+        ctx, _cards = self._run()
+        self.assertFalse(any("trailing card" in w for w in ctx.warnings),
+                         ctx.warnings)
+        ctx5, _c5 = self._run(
+            self.DECK.replace("*END\n", F(0, 0, 0, 0.0) + "\n*END\n"))
+        self.assertTrue(any("trailing card" in w for w in ctx5.warnings),
+                        ctx5.warnings)

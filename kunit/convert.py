@@ -48,6 +48,9 @@ class ScanResult:
         # rather than coordinates (see h_ale_volume_filling).
         self.sale_vel_vectors: Set[int] = set()
         self.sale_index_boxes: Set[int] = set()
+        # *CONTROL_SPH IDIM: 2D SPH (IDIM=2/-2) changes what the
+        # *ELEMENT_SPH MASS field means (see h_element_sph).
+        self.sph_idim: Optional[int] = None
         self.torsional_mats: Set[int] = set()
         self.smat_blocks: List[Tuple[KFile, Block, str]] = []
         self.probes: Dict[str, list] = {"ro": [], "e": [], "d": [],
