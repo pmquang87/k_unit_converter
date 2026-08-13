@@ -445,8 +445,16 @@ SPECS: Dict[str, Spec] = {
         C({i: PRESSURE for i in range(5)}, EOS_TAB_W),
         C({}, EOS_TAB_W), C({}, EOS_TAB_W)],
         curves=[(0, 4, DIMLESS, PRESSURE), (0, 5, DIMLESS, DIMLESS)]),
+    # R16 Vol II p.1-7..1-8 (*EOS_LINEAR_POLYNOMIAL / EOS_001): p = C0 + C1*mu + C2*mu^2
+    # + C3*mu^3 + (C4 + C5*mu + C6*mu^2)*E, where E is the internal energy per
+    # unit reference volume (pressure units).  So C0..C3 are pressures while
+    # C4..C6 are DIMENSIONLESS (gamma-1 for an ideal gas) - the same shape as
+    # EOS_GRUNEISEN's (GAMMAO + A*mu)*E term below.  Card2 E0 (pressure), V0
+    # (initial relative volume, dimensionless).  Scaling C4..C6 as pressure
+    # turned an air EOS's C4=C5=0.4 into 400 and collapsed the timestep
+    # (dynaexamples s-ale/wavestructure/2Dlag.k, 2026-08 corpus audit).
     "EOS_LINEAR_POLYNOMIAL": Spec(cards=[
-        C({i: PRESSURE for i in range(1, 8)}), C({0: PRESSURE})]),
+        C({i: PRESSURE for i in range(1, 5)}), C({0: PRESSURE})]),
     # R16 Vol II p.1-15..1-16 (*EOS_GRUNEISEN): Card1 EOSID C S1 S2 S3 GAMMAO
     # A E0 - C is the vs(vp) curve intercept (velocity units); S1-S3, GAMMAO
     # and A are unitless; E0 is the initial internal energy per unit reference
@@ -578,8 +586,38 @@ SPECS: Dict[str, Spec] = {
     # ISTAB QL SPHSORT ISHIFT) flags plus the dimensionless quasi-linear
     # coefficient QL, so both stay unscaled.
     "CONTROL_SPH": Spec(cards=[C({2: TIME, 6: TIME, 7: VELOCITY}), C(), C()]),
-    "CONTROL_ALE": Spec(cards=[C(), C({0: TIME, 1: TIME, 6: PRESSURE})],
-                        extra_ok=True),
+    # R16 Vol I p.12-51..12-59 (*CONTROL_ALE): four cards, 1 required and
+    # 2-4 optional; *CONTROL_BULK_VISCOSITY starts on p.12-60, so there is
+    # nothing beyond Card 4 to tolerate - hence no extra_ok, a fifth card is
+    # a real anomaly and should raise the trailing-card warning.
+    # Card 1 DCT NADV METH AFAC BFAC CFAC DFAC EFAC is a flag, two counts and
+    # the five ALE mesh-smoothing weight factors (p.12-53, Remark 5) - all
+    # dimensionless.  Card 2 START END AAFAC VFACT PRIT EBC PREF NSIDEBC:
+    # START/END are the smoothing/advection start and end times, PREF the
+    # "pseudo reference pressure equivalent to an environmental pressure"
+    # that Remark 8 says is subtracted from the diagonal stress components
+    # (p.12-54, 12-58); AAFAC is an obsolete advection factor, VFACT a
+    # volume-fraction limit, PRIT/EBC flags and NSIDEBC a node-set id.
+    # Card 3 NCPL NBKT IMASCL CHECKR BEAMIN MMGPREF PDIFMX DTMUFAC - only
+    # PDIFMX is dimensional: "maximum of pressure difference between
+    # neighboring ALE elements under which the nodal forces are zeroed out"
+    # (p.12-55), i.e. a stress.  NCPL/NBKT are cycle counts between coupling
+    # and bucket-sort passes (NBKT < 0 is a curve id), IMASCL a mass-scaling
+    # flag, CHECKR "a scale for diffusive flux calculation" limited to
+    # 0.01..0.1 (p.12-55 + Remark 9), BEAMIN a 0.0/1.0 float flag, MMGPREF a
+    # flag or a negative curve/table id, and DTMUFAC scales the viscous
+    # element time step DTMU = rho*l^2/(2*mu) - a factor on an internally
+    # computed quantity, not an input time.  Card 4 OPTIMPP IALEDR BNDFLX
+    # MINMAS: two on/off flags, a *SET_MULTI-MATERIAL_GROUP_LIST id, and
+    # MINMAS the "factor of the minimum mass allowed in an element",
+    # MINMAS x initial density x material volume (p.12-56) - a pure ratio,
+    # so the 1e-5 default must survive verbatim.
+    # NOT modelled: the curve/table behind MMGPREF < 0 carries PREF values
+    # as ordinates, but the id is stored negated and the table spelling
+    # nests AMMGID -> PREF(t), which curves= cannot express; such a curve
+    # falls out as unreferenced and warns loudly instead of mis-scaling.
+    "CONTROL_ALE": Spec(cards=[
+        C(), C({0: TIME, 1: TIME, 6: PRESSURE}), C({6: PRESSURE}), C()]),
 
     # ── ALE / S-ALE (R16 Vol I) ─────────────────────────────────────────────
     # p.4-80..4-87 (*ALE_REFERENCE_SYSTEM_GROUP): Card 1 SID STYPE PRTYPE
@@ -1344,16 +1382,37 @@ def h_element_sph(block: Block, ctx, edit: bool) -> None:
     mass, but MASS < 0 - or any value with the VOLUME option - is a particle
     VOLUME (density then comes from the material card), so the field's
     dimension depends on its sign.  NEND generation replicates the same MASS
-    value across NID..NEND, so scaling the one field covers the range."""
+    value across NID..NEND, so scaling the one field covers the range.
+
+    2D SPH (*CONTROL_SPH IDIM, recorded in the scan pass): for BOTH 2D forms
+    the input MASS field carries mass/length dimensions, and a volume entry
+    is a volume per unit thickness, i.e. an AREA.  Plane strain (IDIM=2):
+    mass per unit out-of-plane thickness, rho*dx*dy (e.g. g/cm).
+    Axisymmetric (IDIM=-2): the input is rho*A per R16 Vol I p.19-136/137
+    Remark 1 - the "mass per radian" rho*A*x it also mentions is only the
+    d3hsp PRINTOUT, not the input field (verified against R14.1.1: d3hsp
+    part mass = sum(MASS*x_i), so the field itself is rho*A, again M/L).
+    Scaling these as 3D mass left the dynaexamples sph/bar-i/bar1.k
+    particles 10x too heavy and collapsed the timestep on bar contact
+    (2026-08 corpus audit; the initial smoothing length is unaffected -
+    R14 sets h0 = CSLH x particle spacing purely geometrically)."""
     if not edit:
         return
     kf = ctx.kf
     vol_opt = "VOLUME" in block.name.split("_")
+    plane2d = ctx.scan.sph_idim in (2, -2)
+    if plane2d:
+        ctx.note(f"*{block.name}: 2D SPH (*CONTROL_SPH IDIM="
+                 f"{ctx.scan.sph_idim}) - MASS scaled as mass/length "
+                 "(volume entries as area)")
     for li in block.data:
         v = kf.get_number(li, EMASS_W, block.long, 2)
         if not v:
             continue
-        dim = VOLUME if (vol_opt or v < 0) else MASS
+        if vol_opt or v < 0:
+            dim = AREA if plane2d else VOLUME
+        else:
+            dim = MASS_LEN if plane2d else MASS
         kf.scale_field(li, EMASS_W, block.long, 2, ctx.fac(dim), pad_right=2)
     ctx.count(block.name)
 
@@ -4801,6 +4860,18 @@ def x_part_inertia(block: Block, ctx) -> None:
             return
 
 
+def x_scan_control_sph(block: Block, ctx) -> None:
+    """Record *CONTROL_SPH IDIM (Card 1 field 4): |IDIM|=2 marks a 2D SPH
+    model, which changes the meaning of the *ELEMENT_SPH MASS field (see
+    h_element_sph).  A written 0 keeps the 3D default."""
+    data = list(block.data)
+    if not data:
+        return
+    v = ctx.kf.get_number(data[0], STD8, block.long, 3)
+    if v:
+        ctx.scan.sph_idim = int(v)
+
+
 def x_scan_part(block: Block, ctx) -> None:
     """Collect (pid, secid, mid) so DRO can classify discrete materials.
 
@@ -5112,6 +5183,7 @@ SCAN_EXTRA: Dict[str, Callable] = {
     "MAT_PIECEWISE_LINEAR_PLASTICITY": h_mat_024,
     "MAT_MODIFIED_PIECEWISE_LINEAR_PLASTICITY": h_mat_024,
     "MAT_LOW_DENSITY_FOAM": h_mat_057,
+    "CONTROL_SPH": x_scan_control_sph,
     "PART": x_scan_part,
     "PART_INERTIA": x_scan_part,
     "PART_CONTACT": x_scan_part,
