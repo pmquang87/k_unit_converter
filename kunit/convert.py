@@ -8,10 +8,11 @@ import os
 import shutil
 import tempfile
 from collections import Counter
+from decimal import Decimal
 from fractions import Fraction
 from typing import Dict, List, Optional, Set, Tuple
 
-from .parser import Block, KFile, ParameterFieldError, STD8
+from .parser import Block, KFile, ParameterFieldError, STD8, parse_number
 
 try:
     from .parser import FieldWidthError
@@ -53,6 +54,14 @@ class ScanResult:
         self.sph_idim: Optional[int] = None
         self.torsional_mats: Set[int] = set()
         self.smat_blocks: List[Tuple[KFile, Block, str]] = []
+        # parameter-aware conversion (convert(..., parameters=True)):
+        # NAME -> {factor: keyword that used it} gathered by the edit pass,
+        # NAME -> [ParamDef] from collect_parameters, names defined by
+        # *PARAMETER_EXPRESSION (never rescalable)
+        self.param_factors: Dict[str, Dict[Fraction, str]] = {}
+        self.param_use_counts: Counter = Counter()
+        self.param_defs: Dict[str, List["ParamDef"]] = {}
+        self.param_expr: Dict[str, list] = {}
         self.probes: Dict[str, list] = {"ro": [], "e": [], "d": [],
                                         "gravity_lcids": [],
                                         "gravity_accels": []}
@@ -74,6 +83,7 @@ class Ctx:
         # inputs
         self.files = files
         self.kf: Optional[KFile] = files[0] if files else None
+        self.cur_block: str = ""
         self.src = src
         self.dst = dst
         self.opts = opts or {}
@@ -122,6 +132,88 @@ class Ctx:
         self.counts[what] += 1
 
 
+# ── *PARAMETER tables ────────────────────────────────────────────────────────
+
+class ParamDef:
+    """One ``R``/``I`` definition inside a *PARAMETER card: where the value
+    field sits so it can be rescaled in place, and whether the definition is
+    file-scoped (*PARAMETER_LOCAL, R16 Vol I p.36-4 Remark 5)."""
+    __slots__ = ("name", "ptype", "kf", "line_idx", "fi", "value", "local")
+
+    def __init__(self, name, ptype, kf, line_idx, fi, value, local=False):
+        self.name, self.ptype, self.kf = name, ptype, kf
+        self.line_idx, self.fi, self.value = line_idx, fi, value
+        self.local = local
+
+
+_PARAM_WIDTHS = [10] * 8
+
+
+def _is_param_block(name: str) -> bool:
+    return (name == "PARAMETER" or name.startswith("PARAMETER_")) and \
+        "EXPRESSION" not in name and "DUPLICATION" not in name
+
+
+def collect_parameters(files: List[KFile]):
+    """Scan every *PARAMETER[_LOCAL|_MUTABLE|_NOECHO] card of the tree.
+
+    Returns (table, defs, expr): table NAME -> Decimal value of the FIRST
+    definition (the *PARAMETER_DUPLICATION default keeps the first), defs
+    NAME -> every ParamDef (all of them are rescaled), and expr NAME ->
+    [(kf, [line indices], type letter, free_format)] of every
+    *PARAMETER_EXPRESSION definition (first line + continuation lines);
+    free format is decided from the 10-char PRMR field alone, because the
+    expression text itself may contain commas (max, min, sign, atan2, mod
+    all take two arguments, p.36-9).  Layout per R16 Vol I *PARAMETER
+    (p.36-2): 10-char PRMR = type letter + up to 9-char name (blanks
+    ignored, case-insensitive) alternating with 10-char VAL, four pairs per
+    card; comma lines follow the same name/value alternation.  Expression
+    continuation lines leave the first 10 columns blank (p.36-8)."""
+    table: Dict[str, Decimal] = {}
+    defs: Dict[str, List[ParamDef]] = {}
+    expr: Dict[str, List[Tuple[KFile, List[int], str]]] = {}
+    for kf in files:
+        for b in kf.blocks:
+            if b.name.startswith("PARAMETER") and "EXPRESSION" in b.name:
+                cur = None
+                for li in b.data:
+                    line = kf.lines[li]
+                    # a fixed 10-column PRMR never contains a comma, so a
+                    # comma there (or right after it) means free format -
+                    # a comma later in the line is part of the expression
+                    free = "," in line[:11]
+                    head = (line.split(",", 1)[0] if free
+                            else line[:10]).strip()
+                    if not head:
+                        if cur is not None:     # continuation (blank PRMR)
+                            cur.append(li)
+                        continue
+                    name = head[1:].replace(" ", "").upper()
+                    cur = [li]
+                    expr.setdefault(name, []).append(
+                        (kf, cur, head[:1].upper(), free))
+                continue
+            if not _is_param_block(b.name):
+                continue
+            for li in b.data:
+                fl = kf.fields(li, _PARAM_WIDTHS, b.long)
+                for fi in range(0, len(fl) - 1, 2):
+                    prmr = fl[fi][0].strip()
+                    if not prmr:
+                        continue
+                    ptype = prmr[0].upper()
+                    name = prmr[1:].replace(" ", "").upper()
+                    if ptype not in ("R", "I") or not name:
+                        continue
+                    v = parse_number(fl[fi + 1][0])
+                    d = ParamDef(name, ptype, kf, li, fi + 1, v,
+                                 local="LOCAL" in b.name)
+                    defs.setdefault(name, []).append(d)
+                    if v is not None and name not in table:
+                        table[name] = v
+    return table, defs, expr
+
+
 # ── multi-file loading ───────────────────────────────────────────────────────
 
 def load_tree(path: str, follow: bool, strict: bool = True):
@@ -164,6 +256,9 @@ def load_tree(path: str, follow: bool, strict: bool = True):
                 _load(rp)
 
     _load(path)
+    table, _defs, _expr = collect_parameters(files)
+    for kf in files:
+        kf.params = table
     return files, inc_entries
 
 
@@ -241,7 +336,11 @@ def _walk(ctx: Ctx, edit: bool) -> None:
         for block in kf.blocks:
             if block.name == "INCLUDE" and ctx.opts.get("follow_includes"):
                 continue
+            ctx.cur_block = block.name
             kind, payload = resolve(block.name)
+            if (kind == "hard" and ctx.opts.get("parameters")
+                    and block.name.startswith("PARAMETER")):
+                continue        # handled by _scale_parameters after the edit
             if kind == "spec":
                 _apply_spec(payload, block, ctx, edit)
                 extra = (EDIT_EXTRA if edit else SCAN_EXTRA).get(_base(block.name))
@@ -300,6 +399,14 @@ def _post_scan(ctx: Ctx) -> None:
             lcdr = _numint(kf, data[0], STD8, block.long, 1)
             if lcdr:
                 ctx.scan.register_curve(lcdr, rdim, ydim, f"MAT_S05 mid={mid}")
+        elif kind == "S06":
+            # R16 Vol II p.2-2034: LCDL / LCDU force (moment) vs
+            # displacement (rotation); as tables the extra axis is velocity
+            for fi, what in ((1, "LCDL"), (2, "LCDU")):
+                lc = _numint(kf, data[0], STD8, block.long, fi)
+                if lc:
+                    ctx.scan.register_curve(lc, xdim, ydim, f"MAT_S06 {what} mid={mid}")
+                    ctx.scan.register_table(lc, rdim, xdim, ydim)
 
     # tables: propagate axis dims to their sub-curves
     for tbid, (vdim, xdim, ydim) in list(ctx.scan.table_dims.items()):
@@ -363,6 +470,270 @@ def inventory(files, follow_includes: bool = False) -> Dict[str, Tuple[str, int]
 
 # ── conversion ───────────────────────────────────────────────────────────────
 
+def _scale_parameters(ctx: Ctx) -> None:
+    """Rescale every *PARAMETER value that fed a dimensional field.
+
+    Rules: a parameter must be used with ONE factor only (a density and a
+    thickness sharing a name is a conflict), must be defined either by plain
+    *PARAMETER cards or by *PARAMETER_EXPRESSION cards - not both (which
+    definition wins depends on order and *PARAMETER_DUPLICATION, p.36-6) -
+    and must be real-typed when the factor is not 1.  A name with several
+    plain definitions is only rescaled when they are interchangeable (same
+    file, same value, none LOCAL) - *PARAMETER_LOCAL gives the same name
+    different meanings per file (p.36-4 Remark 5), and kunit's uses are
+    keyed by name only.  After rescaling, every ``&name`` reference in the
+    tree must have been seen by the factor sink; references in fields kunit
+    does not scale (dimensionless fields, unknown keywords, curve scale
+    factors) would silently receive the rescaled value and are refused.
+    Violations are ctx.errors -> ConvertError."""
+    for name, uses in sorted(ctx.scan.param_factors.items()):
+        facs = set(uses)
+        if len(facs) > 1:
+            ctx.error(f"parameter &{name}: conflicting dimensions - used by "
+                      + ", ".join(f"*{kw} (x{float(f):.6G})"
+                                  for f, kw in sorted(uses.items(),
+                                                      key=lambda kv: str(kv[1])))
+                      + "; split the parameter to convert")
+            continue
+        f = next(iter(facs))
+        if f == 1:
+            continue
+        if name in ctx.scan.param_expr and name in ctx.scan.param_defs:
+            ctx.error(f"parameter &{name} is defined by both *PARAMETER and "
+                      "*PARAMETER_EXPRESSION - which definition is active "
+                      "depends on order and *PARAMETER_DUPLICATION (R16 "
+                      "Vol I p.36-6); convert manually")
+            continue
+        if name in ctx.scan.param_expr and name not in ctx.scan.param_defs:
+            _scale_expression(ctx, name, f, uses[f])
+            continue
+        defs = ctx.scan.param_defs.get(name)
+        if not defs:
+            ctx.error(f"parameter &{name} feeds a dimensional field "
+                      f"(*{uses[f]}, x{float(f):.6G}) but is not defined in "
+                      "the tree")
+            continue
+        if len(defs) > 1 and (any(d.local for d in defs)
+                              or len({id(d.kf) for d in defs}) > 1
+                              or len({d.value for d in defs}) > 1):
+            ctx.error(f"parameter &{name} has {len(defs)} definitions with "
+                      "*PARAMETER_LOCAL scoping, different values or in "
+                      "different files - kunit resolves uses by name only "
+                      "and cannot tell which definition each use sees (R16 "
+                      "Vol I p.36-4 Remark 5); rename the parameter or "
+                      "convert manually")
+            continue
+        for d in defs:
+            if d.ptype == "I":
+                ctx.error(f"parameter &{name} is an integer parameter but "
+                          f"feeds a dimensional field (*{uses[f]}, "
+                          f"x{float(f):.6G}) - cannot rescale")
+                break
+            if d.value is None:
+                ctx.error(f"parameter &{name}: its *PARAMETER value is not "
+                          "a number")
+                break
+            blk = next(b for b in d.kf.blocks if d.line_idx in b.data)
+            d.kf.scale_field(d.line_idx, _PARAM_WIDTHS, blk.long, d.fi, f)
+        else:
+            ctx.count("PARAMETER")
+            ctx.note(f"parameter &{name} rescaled x{float(f):.6G} "
+                     f"(feeds *{uses[f]})")
+    _check_unseen_references(ctx)
+
+
+def _check_unseen_references(ctx: Ctx) -> None:
+    """Refuse when a rescaled parameter is referenced in fields the edit
+    pass never scaled: those fields (dimensionless Spec fields, unknown or
+    soft keywords, unresolved curve scale factors, *INCLUDE names) would
+    silently receive the rescaled value."""
+    scaled = {n for n, u in ctx.scan.param_factors.items()
+              if any(fx != 1 for fx in u)}
+    if not scaled:
+        return
+    refs: Counter = Counter()
+    ref_re = _re.compile(r"&\s*([A-Za-z_][A-Za-z0-9_]*)")
+    for kf in ctx.files:
+        for b in kf.blocks:
+            if b.name.startswith("PARAMETER"):
+                continue        # definitions and expression texts
+            for li in b.data:
+                line = kf.lines[li]
+                if "&" in line:
+                    for m in ref_re.finditer(line):
+                        refs[m.group(1).upper()] += 1
+    for name in sorted(scaled):
+        extra = refs.get(name, 0) - ctx.scan.param_use_counts.get(name, 0)
+        if extra > 0:
+            ctx.error(f"parameter &{name} is rescaled but {extra} of its "
+                      f"references sit in fields kunit does not scale "
+                      "(dimensionless fields, unknown keywords, curve scale "
+                      "factors or *INCLUDE names) - those would silently "
+                      "receive the rescaled value; convert manually")
+
+
+_re = __import__("re")
+_IDENT_RE = _re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# numeric literals (1.0, .5, 2E-3, 1.0D+5) - blanked before scanning for
+# identifiers so an exponent letter is not mistaken for a parameter name
+_NUMLIT_RE = _re.compile(r"(?<![\w])(?:\d+\.?\d*|\.\d+)(?:[eEdD][-+]?\d+)?")
+_EXPR_WIDTH = 70        # R16 Vol I p.36-7: PRMR in a field of 10, the rest
+
+
+def _expr_text(kf: KFile, lines: List[int], free: bool) -> str:
+    """Expression text of one *PARAMETER_EXPRESSION entry."""
+    first = kf.lines[lines[0]]
+    if free:
+        return first.split(",", 1)[1].strip()
+    parts = [first[10:].strip()] + [kf.lines[li].strip() for li in lines[1:]]
+    return "".join(parts)
+
+
+def _expr_idents(text: str) -> Set[str]:
+    """Parameter names referenced by an expression: identifiers with numeric
+    literals blanked first (so 1.0E-3 contributes no 'E') and function calls
+    skipped (an identifier directly followed by '(' is one of the p.36-8
+    functions, not a parameter)."""
+    t = _NUMLIT_RE.sub(" ", text)
+    out: Set[str] = set()
+    for m in _IDENT_RE.finditer(t):
+        j = m.end()
+        while j < len(t) and t[j] == " ":
+            j += 1
+        if j < len(t) and t[j] == "(":
+            continue
+        out.add(m.group(0).upper())
+    return out
+
+
+def _fmt_factor(f: Fraction) -> str:
+    """Factor as a plain decimal token (no exponent): the manual documents
+    the expression grammar by example only, so 0.000001 is the safe spelling
+    of 1e-6.  15 significant digits - below the 1e-9 field-format tolerance
+    the self-check already accepts."""
+    from decimal import localcontext
+    with localcontext() as c:
+        c.prec = 15
+        d = (Decimal(f.numerator) / Decimal(f.denominator)).normalize()
+    s = format(d, "f")
+    return s if "." in s else s + ".0"
+
+
+def _chunk_expr(text: str, width: int) -> Optional[List[str]]:
+    """Split an expression into card-width chunks, breaking only after an
+    operator, parenthesis or comma - the manual does not promise that a
+    token may straddle continuation lines (R16 Vol I p.36-8).  A '+'/'-'
+    that is part of an exponent (1.0E-3) is not a boundary.  Returns None
+    when a chunk has no such boundary."""
+    chunks: List[str] = []
+    s = text
+    while len(s) > width:
+        cut = 0
+        for p in range(width, 0, -1):
+            c = s[p - 1]
+            if c not in "+-*/(),":
+                continue
+            if c in "+-" and p >= 2 and s[p - 2] in "eEdD" \
+                    and p < len(s) and s[p].isdigit():
+                continue                      # exponent sign, not an operator
+            cut = p
+            break
+        if not cut:
+            return None
+        chunks.append(s[:cut])
+        s = s[cut:]
+    chunks.append(s)
+    return chunks
+
+
+def _scale_expression(ctx: Ctx, name: str, f: Fraction, used_by: str) -> None:
+    """Rescale a *PARAMETER_EXPRESSION result by wrapping it: ``expr`` ->
+    ``(expr)*factor``.  Exact for the field it feeds; the expression's input
+    parameters keep their original units (noted).  Refused when the result
+    is itself an input of another expression (the wrapped value would leak
+    into it) or when the wrapped text no longer fits its card (R16 Vol I
+    p.36-8: continuation lines leave the first 10 columns blank)."""
+    types = {t for _kf, _lines, t, _free in ctx.scan.param_expr[name]}
+    if types - {"R"}:
+        ctx.error(f"parameter &{name} is a *PARAMETER_EXPRESSION of type "
+                  f"{'/'.join(sorted(types))} that feeds a dimensional field "
+                  f"(*{used_by}, x{float(f):.6G}) - only real (R) "
+                  "expressions can be rescaled (an integer result would be "
+                  "truncated)")
+        return
+    # forward guard: if any input of this expression is itself rescaled
+    # (a plain parameter feeding a dimensional field, or another wrapped
+    # expression), LS-DYNA would re-evaluate the expression from the
+    # rescaled inputs and the wrap would scale the result twice
+    rescaled = {n for n, u in ctx.scan.param_factors.items()
+                if any(fx != 1 for fx in u)}
+    own_inputs: Set[str] = set()
+    for kf, lines, _t, free in ctx.scan.param_expr[name]:
+        own_inputs |= _expr_idents(_expr_text(kf, lines, free))
+    bad_inputs = sorted((own_inputs & rescaled) - {name})
+    if bad_inputs:
+        ctx.error(f"parameter &{name} is a *PARAMETER_EXPRESSION whose "
+                  f"input(s) " + ", ".join("&" + n for n in bad_inputs)
+                  + " are themselves rescaled - wrapping the result would "
+                  f"scale it twice (feeds *{used_by}, x{float(f):.6G}); "
+                  "convert manually")
+        return
+    if name in own_inputs:
+        ctx.error(f"parameter &{name} is a *PARAMETER_EXPRESSION redefined "
+                  "in terms of itself (MUTABLE, R16 Vol I p.36-10 Remark 4) "
+                  "- wrapping every definition would scale it twice; "
+                  "convert manually")
+        return
+    # reverse guard: the wrapped result must not be an input of another
+    # expression (which LS-DYNA would evaluate from the wrapped value)
+    uses_in_expr = []
+    for other, defs in ctx.scan.param_expr.items():
+        if other == name:
+            continue
+        for kf, lines, _t, free in defs:
+            if name in _expr_idents(_expr_text(kf, lines, free)):
+                uses_in_expr.append(other)
+    if uses_in_expr:
+        ctx.error(f"parameter &{name} is a *PARAMETER_EXPRESSION result that "
+                  f"feeds a dimensional field (*{used_by}, x{float(f):.6G}) "
+                  f"and is also an input of the expression(s) "
+                  + ", ".join("&" + u for u in sorted(set(uses_in_expr)))
+                  + " - cannot rescale without double-scaling; convert "
+                    "manually")
+        return
+    fac = _fmt_factor(f)
+    for kf, lines, _t, free in ctx.scan.param_expr[name]:
+        text = _expr_text(kf, lines, free)
+        wrapped = f"({text})*{fac}"
+        first = kf.lines[lines[0]]
+        if free:
+            head = first.split(",", 1)[0]
+            new = f"{head},{wrapped}"
+            if len(new) > 80:
+                ctx.error(f"parameter &{name}: rescaled expression exceeds "
+                          "80 columns - convert manually")
+                return
+            kf.lines[lines[0]] = new
+            continue
+        chunks = _chunk_expr(wrapped, _EXPR_WIDTH)
+        if chunks is None:
+            ctx.error(f"parameter &{name}: rescaled expression has no "
+                      f"operator boundary within {_EXPR_WIDTH} columns to "
+                      "continue the card at - convert manually")
+            return
+        if len(chunks) > len(lines):
+            ctx.error(f"parameter &{name}: rescaled expression needs "
+                      f"{len(chunks)} card lines but the deck has "
+                      f"{len(lines)} - convert manually")
+            return
+        kf.lines[lines[0]] = first[:10] + chunks[0]
+        for k, li in enumerate(lines[1:], 1):
+            kf.lines[li] = " " * 10 + (chunks[k] if k < len(chunks) else "")
+    ctx.count("PARAMETER_EXPRESSION")
+    ctx.note(f"parameter expression &{name} wrapped as (expr)*{fac} (feeds "
+             f"*{used_by}); its input parameters keep their original units")
+
+
 def _out_path_for(in_path: str, dst: UnitSystem) -> str:
     stem, ext = os.path.splitext(in_path)
     return f"{stem}__{dst.key}{ext}"
@@ -391,11 +762,26 @@ def convert(path: str, src: UnitSystem, dst: UnitSystem, out_path: str,
             curve_overrides: Optional[Dict[int, Tuple[Dim, Dim]]] = None,
             self_check: bool = True,
             verify_roundtrip: bool = False,
-            backup: bool = True) -> Ctx:
+            backup: bool = True,
+            parameters: bool = False) -> Ctx:
+    """parameters=True scales *PARAMETER values by the dimension of the
+    fields that reference them (``&name``) instead of refusing the deck;
+    see _scale_parameters for the rules."""
     files, inc_entries = load_tree(path, follow_includes)
     opts = {"blast_unit": blast_unit, "follow_includes": follow_includes,
-            "curve_overrides": curve_overrides or {}}
+            "curve_overrides": curve_overrides or {},
+            "parameters": parameters}
     ctx = Ctx(files, src, dst, opts)
+    if parameters:
+        _table, ctx.scan.param_defs, ctx.scan.param_expr = \
+            collect_parameters(files)
+
+        def sink(name, f):
+            ctx.scan.param_factors.setdefault(name, {}).setdefault(
+                f, ctx.cur_block)
+            ctx.scan.param_use_counts[name] += 1
+        for kf in files:
+            kf.param_sink = sink
     _walk(ctx, edit=False)                      # pass 1: semantics + inventory
     _post_scan(ctx)
 
@@ -414,6 +800,8 @@ def convert(path: str, src: UnitSystem, dst: UnitSystem, out_path: str,
 
     try:
         _walk(ctx, edit=True)                   # pass 2: rewrite fields
+        if parameters:
+            _scale_parameters(ctx)
     except (ParameterFieldError, FieldWidthError) as e:
         raise ConvertError(f"{ctx.kf.path}: {e}") from None
     if ctx.errors:
@@ -506,30 +894,36 @@ def convert(path: str, src: UnitSystem, dst: UnitSystem, out_path: str,
             ctx.self_check = f"error: {e}"
 
     if verify_roundtrip:
-        if len(files) > 1:
+        n_wrapped = ctx.counts.get("PARAMETER_EXPRESSION", 0)
+        if n_wrapped:
+            ctx.roundtrip = (f"skipped ({n_wrapped} *PARAMETER_EXPRESSION "
+                             "wrapped - re-wrapping is not idempotent)")
+        elif len(files) > 1:
             ctx.roundtrip = "skipped (multi-file tree)"
         else:
             ctx.roundtrip = _roundtrip(out_path, src, dst, blast_unit,
-                                       curve_overrides)
+                                       curve_overrides, parameters)
             if not ctx.roundtrip.startswith("OK"):
                 ctx.warn("ROUNDTRIP CHECK: " + ctx.roundtrip)
     return ctx
 
 
 def _roundtrip(out_path: str, src: UnitSystem, dst: UnitSystem,
-               blast_unit, curve_overrides) -> str:
+               blast_unit, curve_overrides, parameters: bool = False) -> str:
     """Convert output back to src and forward again; the two forward results
-    must agree byte-for-byte (comments ignored) or precision was lost."""
+    must agree byte-for-byte (comments ignored) or precision was lost.
+    (A rescaled *PARAMETER_EXPRESSION is wrapped again on every pass, so
+    decks with such expressions report a textual difference by design.)"""
     tmp = tempfile.mkdtemp(prefix="kunit_rt_")
     back = os.path.join(tmp, "back.k")
     fwd2 = os.path.join(tmp, "fwd2.k")
     try:
         convert(out_path, dst, src, back, blast_unit=blast_unit,
                 curve_overrides=curve_overrides, allow_unknown=True,
-                self_check=False)
+                self_check=False, parameters=parameters)
         convert(back, src, dst, fwd2, blast_unit=blast_unit,
                 curve_overrides=curve_overrides, allow_unknown=True,
-                self_check=False)
+                self_check=False, parameters=parameters)
 
         def payload(p):
             with open(p, newline="") as fh:

@@ -63,8 +63,13 @@ def cmd_check(args) -> int:
     except ConvertError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
-    ctx = scan(files, None, {"follow_includes": args.follow_includes})
+    ctx = scan(files, None, {"follow_includes": args.follow_includes,
+                             "parameters": args.parameters})
     inv = inventory(files, follow_includes=args.follow_includes)
+    if args.parameters:
+        for kw, (kind, n) in list(inv.items()):
+            if kind == "hard" and kw.startswith("PARAMETER"):
+                inv[kw] = ("custom", n)
 
     kinds = {"spec": [], "custom": [], "white": [], "soft": [], "hard": [],
              "unknown": []}
@@ -194,7 +199,8 @@ def cmd_convert(args) -> int:
                       curve_overrides=parse_curve_overrides(args.curve),
                       self_check=not args.no_self_check,
                       verify_roundtrip=args.verify_roundtrip,
-                      backup=not args.no_backup)
+                      backup=not args.no_backup,
+                      parameters=args.parameters)
     except ConvertError as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -237,6 +243,10 @@ def main(argv=None) -> int:
     p.add_argument("deck")
     p.add_argument("--follow-includes", action="store_true",
                    help="check the whole *INCLUDE tree")
+    p.add_argument("--parameters", action="store_true",
+                   help="assume a parameter-aware conversion (convert "
+                        "--parameters): *PARAMETER keywords stop being "
+                        "hard stops")
     p.add_argument("--json", action="store_true",
                    help="machine-readable JSON report on stdout")
     p.set_defaults(fn=cmd_check)
@@ -267,6 +277,13 @@ def main(argv=None) -> int:
     p.add_argument("--allow-unknown", action="store_true",
                    help="convert even if unknown keywords are present "
                         "(they are left unchanged - review them!)")
+    p.add_argument("--parameters", action="store_true",
+                   help="parameter-aware: rescale *PARAMETER values by the "
+                        "dimension of the fields that reference them (&name "
+                        "stays) and wrap *PARAMETER_EXPRESSION results as "
+                        "(expr)*factor; conflicting uses, integer "
+                        "parameters, scoped duplicates and expression "
+                        "chains are refused")
     p.add_argument("--no-self-check", action="store_true",
                    help="skip re-detecting the output as a sanity check")
     p.add_argument("--verify-roundtrip", action="store_true",

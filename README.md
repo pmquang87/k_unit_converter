@@ -23,6 +23,7 @@ kunit convert deck.k --to ton-mm-s --follow-includes   # convert the include tre
 kunit convert deck.k --to ton-mm-s --dry-run           # report only, write nothing
 kunit convert deck.k --to ton-mm-s --verify-roundtrip  # prove no precision loss
 kunit convert deck.k --to ton-mm-s --curve 17=time:accel   # declare curve dims
+kunit convert deck.k --to ton-mm-s --parameters   # rescale *PARAMETER values too
 kunit gui                                # or kunit-gui
 ```
 
@@ -84,14 +85,26 @@ LS-DYNA decks in different unit systems you can `detect`, `check`, and
   Anything unknown **aborts** the conversion (override: `--allow-unknown`,
   which leaves them unchanged and lists them). `*PARAMETER`,
   `*DEFINE_TRANSFORMATION`, `*DEFINE_FUNCTION`, `*INCLUDE_TRANSFORM` are hard
-  stops; a `&param` in any field to be scaled is always an error.
+  stops; a `&param` (or inline `<expression>`) in any field to be scaled is
+  an error — unless `--parameters` is given, which rescales each
+  `*PARAMETER` value by the dimension of the fields that reference it (the
+  `&name` references stay) and wraps a `*PARAMETER_EXPRESSION` result that
+  feeds a dimensional field as `(expr)*factor`. Refused, because kunit
+  cannot prove them safe: conflicting uses, integer parameters, undefined
+  parameters, expressions whose inputs are themselves rescaled (double
+  scaling), `*PARAMETER_LOCAL`/duplicate definitions spanning files, names
+  defined both plainly and by expression, and references in fields kunit
+  does not scale. `kunit check --parameters` previews a deck under this
+  mode.
   Unresolvable curves can be declared with `--curve LCID=<xdim>:<ydim>`.
 * **Auto-detection** scores all preset systems against material densities
   (steel 7850 kg/m³, Al 2700, …), elastic moduli (2.1e11 Pa steel — this
   pins the *time* unit via c=√(E/ρ)), detonation velocities, gravity-shaped
   `*LOAD_BODY` curves (9.80665 m/s²), and `$ Unit system :` header comments,
   gathering evidence across the whole include tree. Ambiguous verdicts refuse
-  to convert without an explicit `--from`.
+  to convert without an explicit `--from`. (`g-mm-s` shares its pressure
+  unit, Pa, with `kg-m-s`, so a deck whose only evidence is a modulus is
+  reported ambiguous.)
 
 ## Checking a deck without converting
 
@@ -111,7 +124,8 @@ for CI pipelines.
   driven by physical evidence only and cannot confirm its own claim.
 * **`--verify-roundtrip`**: converts the output back to the source system and
   forward again; the two forward results must agree byte-for-byte (comments
-  ignored), proving formatting lost no precision.
+  ignored), proving formatting lost no precision. (Skipped for decks with
+  rescaled `*PARAMETER_EXPRESSION`s — re-wrapping is not idempotent.)
 * A `<out>.kunit.log` report (factors, keyword counts, warnings, notes) is
   written next to every output.
 

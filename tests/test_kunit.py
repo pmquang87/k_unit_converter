@@ -2068,11 +2068,32 @@ class FabricTests(unittest.TestCase):
         i = lines.index("*MAT_FABRIC")
         self.assertAlmostEqual(float(lines[i + 4][10:20]), 2e-6)
 
-    def test_mat_fabric_nonzero_flc_refused(self):
+    def test_mat_fabric_flc_is_dimensionless(self):
+        # R16 Vol I p.3-29: FLC is the leakage flow coefficient in every
+        # branch of the Wang-Nefske mass-flow formulas - left unchanged
         deck = self._deck(card3=F(0.0, 0.35, 0.0, 0.0, 0.0, 0, 0, 0.0))
-        p = _write(deck)
-        with self.assertRaisesRegex(ConvertError, "FLC"):
-            convert(p, self.SLIN, TON, p + ".o.k", self_check=False)
+        lines, ctx = self._conv(deck)
+        i = lines.index("*MAT_FABRIC")
+        self.assertAlmostEqual(float(lines[i + 3][10:20]), 0.35)
+
+    def test_mat_fabric_fac_without_fvopt_is_unused(self):
+        # FVOPT = 0 and no airbag with a nonzero OPT in the deck: FAC is never
+        # read - left unchanged with a note
+        deck = self._deck(card3=F(0.0, 0.0, 0.5, 0.0, 0.0, 0, 0, 0.0))
+        lines, ctx = self._conv(deck)
+        i = lines.index("*MAT_FABRIC")
+        self.assertAlmostEqual(float(lines[i + 3][20:30]), 0.5)
+        self.assertTrue(any("FAC is unused" in n for n in ctx.notes))
+
+    def test_mat_fabric_fac_scaled_per_venting_option(self):
+        # FVOPT 7: FAC is a velocity (in/s -> mm/s, x25.4); FVOPT 5: s/m
+        # (x1/25.4); FVOPT 1: unit-less
+        for fvopt, fac in ((7, 25.4), (5, 1 / 25.4), (1, 1.0)):
+            deck = self._deck(card3=F(0.0, 0.0, 2.0, 0.0, 0.0, 0, fvopt, 0.0))
+            lines, ctx = self._conv(deck)
+            i = lines.index("*MAT_FABRIC")
+            self.assertAlmostEqual(float(lines[i + 3][20:30]), 2.0 * fac,
+                                   places=5, msg=f"FVOPT={fvopt}")
 
     def test_mat_fabric_x2_x3_in_the_same_columns_are_fine(self):
         # 0 < X0 < 1 makes fields 2-3 the dimensionless porosity coefficients
