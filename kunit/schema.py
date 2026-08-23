@@ -26,7 +26,7 @@ if TYPE_CHECKING:
     # at runtime, so importing it here would create a circular import.
     from .convert import Ctx
 from .units import (ACCEL, ACCEL_PSD, ACOUST_IMP, ANG_ACCEL, ANG_VEL, AREA, DAMP, DC_FRIC,
-                    DENSITY, Dim, DIM_NAMES, DIMLESS, DISP_PSD, FORCE,
+                    DENSITY, Dim, DIM_NAMES, DIMLESS, DISP_PSD, ENERGY, FORCE,
                     FORCE_PSD, FREQ, HEAT_FLUX, INERTIA, INV_PRESSURE, L4,
                     LENGTH,
                     MASS, MASS_AREA, MASS_LEN, MOMENT, POWER, PRES_PSD,
@@ -651,7 +651,6 @@ SPECS: Dict[str, Spec] = {
     "DAMPING_FREQUENCY_RANGE": Spec(cards=[C({1: FREQ, 2: FREQ})],
                                     extra_ok=True),
     "DAMPING_GLOBAL": Spec(cards=[C({1: FREQ})], curves=[(0, 0, TIME, FREQ)]),
-    "DAMPING_PART_MASS": Spec(repeat=C(), curves=[(0, 1, TIME, FREQ)]),
     # R16 Vol I p.16-32: Card1 PSID XCT YCT ZCT XCH YCH ZCH RADIUS;
     # Card2 XHEV YHEV ZHEV LENL LENM NSID ID ITYPE - the edge vector and
     # the in-plane extents are lengths, NSID/ID/ITYPE are ids/flags
@@ -977,7 +976,7 @@ WHITELIST = {
     "FREQUENCY_DOMAIN_ACOUSTIC_FRINGE_PLOT_PART_SET",
     "FREQUENCY_DOMAIN_ACOUSTIC_FRINGE_PLOT_NODE_SET",
 }
-WHITELIST_PREFIXES = (
+WHITELIST_PREFIXES: Tuple[str, ...] = (
     "SET_", "BOUNDARY_SPC", "DATABASE_HISTORY", "CONTROL_MPP_",
     "DEFORMABLE_TO_RIGID", "INTERFACE_SPRINGBACK",
     "DATABASE_EXTENT_",     # output-content flags only
@@ -1011,8 +1010,10 @@ HARD_FLAGS = {
     "INCLUDE_TRANSFORM": "carries its own scale factors",
     "INCLUDE_PATH": "search-path includes not supported - flatten the deck "
                     "or use plain *INCLUDE with relative paths",
-    "PARAMETER": "parameters may feed dimensional fields",
-    "PARAMETER_EXPRESSION": "parameters may feed dimensional fields",
+    "PARAMETER": "parameters may feed dimensional fields - re-run "
+                 "convert with --parameters to rescale them",
+    "PARAMETER_EXPRESSION": "parameters may feed dimensional fields - "
+                            "re-run convert with --parameters",
     "DEFINE_TRANSFORMATION": "carries its own scale factors",
     "DEFINE_FUNCTION": "free-form expressions cannot be auto-scaled",
     "DEFINE_CURVE_FUNCTION": "free-form expressions cannot be auto-scaled",
@@ -2291,13 +2292,13 @@ def h_mat_fabric(block: Block, ctx, edit: bool) -> None:
 
     Three things make this keyword refuse rather than guess:
 
-    * FLC and FAC (Card 3 fields 2-3, when X0 is 0, -1 or 1) are defined only
-      as "optional porous leakage flow coefficient" / "optional characteristic
-      fabric parameter. (See theory manual.)"  Neither volume of R16 states
-      their units anywhere, and for FVOPT >= 7 the FAC *curve ordinate* is
-      explicitly a "leakage volume flux rate ... equivalent to relative porous
-      gas speed", i.e. a VELOCITY - so the scalar cannot simply be assumed
-      dimensionless either.  Nonzero values are refused.
+    * FLC (Card 3 field 2, when X0 is 0, -1 or 1) is the dimensionless
+      leakage flow coefficient of the Wang-Nefske mass-flow formulas, and
+      FAC's units follow the venting option (R16 Vol I p.3-29: OPT 1-4
+      unit-less, 5-6 s/m, 7-8 a velocity).  FVOPT = 0 defers to the airbag's
+      own OPT - *AIRBAG_WANG_NEFSKE only; HYBRID/CPM bags are refused (Vol
+      II Remarks 9/17).  For X0 = 1 the FLC/FAC curves run over stretching /
+      pressure RATIOS (p.2-323..2-326) instead of time / absolute pressure.
       (For 0 < X0 < 1 the same two columns are X2/X3, dimensionless porosity
       coefficients in A_leak = A0(X0 + X1 rs + X2 rp + X3 rs rp) - safe.)
     * FVOPT < 0 adds Card 4 L R C1 C2 C3, whose C1 is only described as
@@ -2330,20 +2331,39 @@ def h_mat_fabric(block: Block, ctx, edit: bool) -> None:
                   "and adds the coating Card 8 (R16 Vol II p.2-330..2-332) - "
                   "layout not modelled, convert manually.")
         return
+    fac_dim = None
     if not (0 < x0 < 1):
-        for fi, nm, what in ((1, "FLC", "porous leakage flow coefficient"),
-                             (2, "FAC", "characteristic fabric parameter")):
-            if kf.get_number(data[2], STD8, block.long, fi):
-                ctx.error(
-                    f"*{block.name}: {nm} is nonzero, and R16 Vol II p.2-320 "
-                    f"defines it only as an 'optional {what}. (See theory "
-                    "manual.)' - its units are stated nowhere, so it can "
-                    "neither be rescaled nor safely left alone. Convert this "
-                    "fabric manually.")
-                return
+        # FLC is the dimensionless leakage flow coefficient in every branch
+        # of the Wang-Nefske mass-flow formulas; FAC's units follow the
+        # venting option (R16 Vol I p.3-29, see _fac_dim_for_fvopt).  With
+        # FVOPT = 0 they depend on the airbag's own OPT - refused.
+        fac = kf.get_number(data[2], STD8, block.long, 2)
+        fac_dim, fac_note = _fac_dim_with_fallback(ctx, block, abs(fvopt))
+        if fac and fac_dim is None:
+            ctx.error(
+                f"*{block.name}: FAC={fac} with FVOPT={fvopt} - FAC's units "
+                "follow the venting option (R16 Vol I p.3-29), and "
+                + (fac_note or "the option is undecidable")
+                + ". Convert this fabric manually.")
+            return
+        if fac and fac_note and edit:
+            ctx.note(fac_note)
     if not edit:
         ela = kf.get_number(data[2], STD8, block.long, 3)
         tsr = kf.get_number(data[2], STD8, block.long, 7)
+        if not (0 < x0 < 1):
+            # X0 = 1 (Cards 3d/3e, R16 Vol II p.2-323..2-326): the curves
+            # run over the stretching ratio r_s = A/A0 and the pressure
+            # ratio r_p - dimensionless abscissae; X0 = 0 / -1 use time and
+            # absolute pressure (p.2-318/2-321)
+            fx = DIMLESS if x0 == 1 else TIME
+            px = DIMLESS if x0 == 1 else PRESSURE
+            flc = kf.get_number(data[2], STD8, block.long, 1)
+            fac = kf.get_number(data[2], STD8, block.long, 2)
+            if flc and flc < 0:
+                ctx.scan.register_curve(int(-flc), fx, DIMLESS, block.name + " FLC")
+            if fac and fac < 0 and fac_dim is not None:
+                ctx.scan.register_curve(int(-fac), px, fac_dim, block.name + " FAC")
         if ela and ela < 0:              # effective leakage area vs time
             ctx.scan.register_curve(int(-ela), TIME, DIMLESS, block.name + " ELA")
         if tsr and (tsr < 0 or tsr >= 1):   # strain-restoration factor vs time
@@ -2356,6 +2376,10 @@ def h_mat_fabric(block: Block, ctx, edit: bool) -> None:
                     ctx.scan.register_curve(abs(lc), DIMLESS, PRESSURE,
                                        block.name + " Card 7")
         return
+    if not (0 < x0 < 1) and fac_dim not in (None, DIMLESS):
+        fac = kf.get_number(data[2], STD8, block.long, 2)
+        if fac and fac > 0:
+            kf.scale_field(data[2], STD8, block.long, 2, ctx.fac(fac_dim))
     for fi in (1, 2, 3):                                       # RO EA EB
         kf.scale_field(data[0], STD8, block.long, fi,
                        ctx.fac(DENSITY if fi == 1 else PRESSURE))
@@ -5142,6 +5166,15 @@ def resolve(name: str):
     base = resolve_base(name)
     if name in HARD_FLAGS or base in HARD_FLAGS:
         return "hard", HARD_FLAGS.get(name) or HARD_FLAGS[base]
+    if name.startswith("PARAMETER"):
+        # R16 Vol I p.36-2/36-7: *PARAMETER[_EXPRESSION] accept any mix of
+        # the LOCAL / MUTABLE / NOECHO options, in any order - all are the
+        # same hard stop (bypassed by convert(..., parameters=True)).
+        # *PARAMETER_DUPLICATION (p.36-6) only carries the DFLAG switch.
+        if name == "PARAMETER_DUPLICATION":
+            return "white", None
+        return "hard", HARD_FLAGS["PARAMETER_EXPRESSION"
+                                  if "EXPRESSION" in name else "PARAMETER"]
     if base in CUSTOM:
         return "custom", CUSTOM[base]
     if base in SPECS:
@@ -5245,3 +5278,953 @@ register_keyword("MAT_NULL",
 register_keyword("MAT_VACUUM",
                  Spec(cards=[C({1: DENSITY})], probe={"ro": (0, 1)}),
                  alias="MAT_140")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# k_examples_db corpus batch (2026-08-23): the keywords that the web corpus
+# conversion reported as UNKNOWN most often.  Every field map below is taken
+# from the R16 manuals (page cited per keyword).
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _airbag_core(block: Block, ctx, data) -> Optional[Tuple[int, list]]:
+    """Shared *AIRBAG core cards (R16 Vol I p.3-3..3-6): Card 1 SID SIDTYP
+    RBID VSCA PSCA VINI MWD SPSF plus the RBID-dependent sensor cards.
+    Returns (index of the first option-specific card, sensor card dims) or
+    None after reporting an error.  VSCA/PSCA != 1 are refused as in
+    h_airbag_simple (foreign gas-unit system)."""
+    kf = ctx.kf
+    c1 = data[0]
+    for fi, nm in ((3, "VSCA"), (4, "PSCA")):
+        v = kf.get_number(c1, STD8, block.long, fi)
+        if v is not None and v != 0 and v != 1:
+            ctx.error(f"*{block.name}: {nm}={v} means the control-volume gas "
+                      "thermodynamics run in a DIFFERENT unit system than "
+                      "the FE model (R16 Vol I p.3-4); the deck does not say "
+                      "which, so the gas cards cannot be scaled safely - "
+                      "convert this airbag manually.")
+            return None
+    rbid = _numint(kf, c1, STD8, block.long, 2) or 0
+    idx = 1
+    sensor: List[Tuple[int, Dict[int, Dim]]] = []
+    if rbid > 0:
+        if idx >= len(data):
+            ctx.error(f"*{block.name}: RBID={rbid} > 0 requires the sensor "
+                      "Card 2a (R16 Vol I p.3-5) - not found.")
+            return None
+        n = _numint(kf, data[idx], STD8, block.long, 0) or 0
+        nconst = -(-max(n, 0) // 5)
+        if nconst:
+            ctx.warn(f"*{block.name}: RBID={rbid} selects a user-defined "
+                     f"sensor with {n} constant(s) whose units the manual "
+                     "does not document - those cards are left UNSCALED, "
+                     "verify them manually.")
+        idx += 1 + nconst
+    elif rbid < 0:
+        sensor = [(idx, {0: ACCEL, 1: ACCEL, 2: ACCEL, 3: ACCEL, 4: TIME}),
+                  (idx + 1, {i: VELOCITY for i in range(4)}),
+                  (idx + 2, {i: LENGTH for i in range(4)})]
+        idx += 3
+    return idx, sensor
+
+
+def _airbag_core_scale(block: Block, ctx, data, sensor) -> None:
+    kf = ctx.kf
+    kf.scale_field(data[0], STD8, block.long, 5, ctx.fac(VOLUME))   # VINI
+    kf.scale_field(data[0], STD8, block.long, 6, ctx.fac(RATE))     # MWD
+    for li_idx, dims in sensor:
+        for fi, dim in dims.items():
+            kf.scale_field(data[li_idx], STD8, block.long, fi, ctx.fac(dim))
+
+
+def h_airbag_wang_nefske(block: Block, ctx, edit: bool) -> None:
+    """*AIRBAG_WANG_NEFSKE_{OPTIONS}, R16 Vol I p.3-20..3-37.
+
+    After the core cards: Card 3 CV CP T LCT LCMT TVOL LCDT IABT (specific
+    heats "e.g. Joules/kg/K", inlet gas temperature, T(t) curve, mass-flow
+    curve - tank PRESSURE vs time when TVOL != 0 -, tank volume, dT/dt
+    curve, initial bag temperature); Card 4 C23 LCC23 A23 LCA23 CP23 LCCP23
+    AP23 LCAP23 (orifice coefficients are dimensionless, A23/AP23 are vent
+    and leakage AREAS, LCC23 is a coefficient vs time when positive and vs
+    relative pressure when negative, LCA23/LCAP23 are area vs absolute
+    pressure, LCCP23 coefficient vs time; A23 < 0 is a part id); Card 5 PE
+    RO GC LCEFR POVER PPOP OPT KNKDN (ambient pressure/density, GC = 1 in
+    consistent units, exit mass-flow-rate vs gauge pressure, over/pop
+    PRESSURES, knock-down factor vs time); Card 6 IOC IOA IVOL IRO IT LCBF
+    (inflator orifice AREA, VOLUME, DENSITY, temperature, burn fraction vs
+    time); Card 7 TEXT A B MW GASC HCONV exists only when CV = 0 (molar
+    heat-capacity coefficients and the gas constant reduce to ENERGY per
+    h_airbag_simple's argument, MW is a mass per mole; the manual gives no
+    units for HCONV - it is taken as the usual per-area convection
+    coefficient W/(m2 K) and noted); Card 8 (POP option) TDP AXP AYP AZP
+    AMAGP TDURP TDA RBIDP (times and accelerations); Card 9 (JETTING /
+    MULTIPLE_JETTING) jet focal point and vector head coordinates, then
+    CA and BETA (curves vs time when negative) or LCJRV - the normalized
+    jet-velocity factor vs the angle psi (p.3-31/Fig. 3-3, dimensionless
+    both ways) - and BETA; Card 10
+    (either jetting option) XSJFP YSJFP ZSJFP PSID ANGLE NODE1-3; Card 11
+    (CM option) NREACT.  GC != 1 is refused: the gas data are then in a
+    foreign unit system."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    core = _airbag_core(block, ctx, data)
+    if core is None:
+        return
+    idx, sensor = core
+    opts = set(block.name.split("_"))
+    if len(data) < idx + 4:
+        ctx.error(f"*{block.name}: expected at least 4 cards after the core "
+                  f"cards (R16 Vol I p.3-20), found {len(data) - idx}.")
+        return
+    c3, c4, c5, c6 = data[idx], data[idx + 1], data[idx + 2], data[idx + 3]
+    gc = kf.get_number(c5, STD8, block.long, 2)
+    if gc is not None and gc not in (0, 1):
+        ctx.error(f"*{block.name}: GC={gc} (gravitational conversion "
+                  "constant) != 1 means the gas data are not in the FE "
+                  "model's unit system (R16 Vol I p.3-24) - convert this "
+                  "airbag manually.")
+        return
+    cv = kf.get_number(c3, STD8, block.long, 0) or 0
+    tvol = kf.get_number(c3, STD8, block.long, 5) or 0
+    nxt = idx + 4
+    c7 = None
+    if cv == 0 and nxt < len(data):
+        c7 = data[nxt]
+        nxt += 1
+    c8 = None
+    if "POP" in opts and nxt < len(data):
+        c8 = data[nxt]
+        nxt += 1
+    c9 = c10 = None
+    jetting = "JETTING" in opts
+    if jetting and nxt < len(data):
+        c9 = data[nxt]
+        nxt += 1
+        if nxt < len(data):
+            c10 = data[nxt]
+            nxt += 1
+    if not edit:
+        def curve(li, fi, xd, yd, what, absval=False):
+            v = kf.get_number(li, STD8, block.long, fi)
+            if v:
+                lc = int(abs(v)) if absval else int(v)
+                if lc > 0:
+                    ctx.scan.register_curve(lc, xd, yd, f"{block.name} {what}")
+        curve(c3, 3, TIME, TEMP, "LCT T(t)")
+        curve(c3, 4, TIME, PRESSURE if tvol else DAMP,
+              "LCMT tank pressure(t)" if tvol else "LCMT mass flow rate(t)")
+        curve(c3, 6, TIME, RATE, "LCDT dT/dt(t)")
+        lcc23 = kf.get_number(c4, STD8, block.long, 1)
+        if lcc23:
+            ctx.scan.register_curve(int(abs(lcc23)),
+                                    TIME if lcc23 > 0 else DIMLESS, DIMLESS,
+                                    f"{block.name} LCC23")
+        curve(c4, 3, PRESSURE, AREA, "LCA23 vent area(p)")
+        curve(c4, 5, TIME, DIMLESS, "LCCP23")
+        curve(c4, 7, PRESSURE, AREA, "LCAP23 leakage area(p)")
+        curve(c5, 3, PRESSURE, DAMP, "LCEFR exit flow rate(p)")
+        curve(c5, 7, TIME, DIMLESS, "KNKDN")
+        curve(c6, 5, TIME, DIMLESS, "LCBF burn fraction(t)")
+        if c7 is not None:
+            hconv = kf.get_number(c7, STD8, block.long, 5)
+            if hconv is not None and hconv < 0:
+                ctx.scan.register_curve(int(-hconv), TIME, HEAT_FLUX,
+                                        f"{block.name} HCONV(t)")
+        if c9 is not None:
+            if "MULTIPLE" in opts:
+                # R16 Vol I p.3-31 / Fig. 3-3: normalized jet-velocity
+                # factor (typically 0..1) vs the angle psi in degrees
+                curve(c9, 6, DIMLESS, DIMLESS, "LCJRV factor(psi)")
+            else:
+                ca = kf.get_number(c9, STD8, block.long, 6)
+                if ca is not None and ca < 0:     # cone angle vs time
+                    ctx.scan.register_curve(int(-ca), TIME, DIMLESS,
+                                            f"{block.name} CA(t)")
+            beta = kf.get_number(c9, STD8, block.long, 7)
+            if beta is not None and beta < 0:     # efficiency factor vs time
+                ctx.scan.register_curve(int(-beta), TIME, DIMLESS,
+                                        f"{block.name} BETA(t)")
+        return
+    _airbag_core_scale(block, ctx, data, sensor)
+    kf.scale_field(c3, STD8, block.long, 0, ctx.fac(SPEC_HEAT))      # CV
+    kf.scale_field(c3, STD8, block.long, 1, ctx.fac(SPEC_HEAT))      # CP
+    kf.scale_field(c3, STD8, block.long, 5, ctx.fac(VOLUME))         # TVOL
+    a23 = kf.get_number(c4, STD8, block.long, 2)
+    if a23 is not None and a23 > 0:
+        kf.scale_field(c4, STD8, block.long, 2, ctx.fac(AREA))       # A23
+    kf.scale_field(c4, STD8, block.long, 6, ctx.fac(AREA))           # AP23
+    kf.scale_field(c5, STD8, block.long, 0, ctx.fac(PRESSURE))       # PE
+    kf.scale_field(c5, STD8, block.long, 1, ctx.fac(DENSITY))        # RO
+    kf.scale_field(c5, STD8, block.long, 4, ctx.fac(PRESSURE))       # POVER
+    kf.scale_field(c5, STD8, block.long, 5, ctx.fac(PRESSURE))       # PPOP
+    kf.scale_field(c6, STD8, block.long, 1, ctx.fac(AREA))           # IOA
+    kf.scale_field(c6, STD8, block.long, 2, ctx.fac(VOLUME))         # IVOL
+    kf.scale_field(c6, STD8, block.long, 3, ctx.fac(DENSITY))        # IRO
+    if c7 is not None:
+        for fi, dim in ((1, ENERGY), (2, ENERGY), (3, MASS), (4, ENERGY)):
+            kf.scale_field(c7, STD8, block.long, fi, ctx.fac(dim))
+        hconv = kf.get_number(c7, STD8, block.long, 5)
+        if hconv is not None and hconv > 0:
+            kf.scale_field(c7, STD8, block.long, 5, ctx.fac(HEAT_FLUX))
+            ctx.note(f"*{block.name}: HCONV rescaled as a per-area "
+                     "convection coefficient (W/(m2 K)); R16 Vol I p.3-26 "
+                     "gives no units - verify.")
+    if c8 is not None:
+        for fi, dim in ((0, TIME), (1, ACCEL), (2, ACCEL), (3, ACCEL),
+                        (4, ACCEL), (5, TIME), (6, TIME)):
+            kf.scale_field(c8, STD8, block.long, fi, ctx.fac(dim))
+    if c9 is not None:
+        for fi in range(6):
+            kf.scale_field(c9, STD8, block.long, fi, ctx.fac(LENGTH))
+    if c10 is not None:
+        for fi in range(3):
+            kf.scale_field(c10, STD8, block.long, fi, ctx.fac(LENGTH))
+    ctx.count(block.name)
+
+
+def h_airbag_linear_fluid(block: Block, ctx, edit: bool) -> None:
+    """*AIRBAG_LINEAR_FLUID, R16 Vol I p.3-40..3-42: Card 3 BULK RO LCINT
+    LCOUTT LCOUTP LCFIT LCBULK LCID (bulk modulus, fluid density, mass per
+    unit time vs time, mass per unit time vs time, mass per unit time vs
+    pressure, added pressure vs time, bulk modulus vs time, pressure vs
+    time); optional Card 4 P_LIMIT P_LIMLC NONULL (limit pressure, its
+    curve vs time)."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    core = _airbag_core(block, ctx, data)
+    if core is None:
+        return
+    idx, sensor = core
+    if idx >= len(data):
+        ctx.error(f"*{block.name}: Card 3 (BULK RO ...) missing.")
+        return
+    c3 = data[idx]
+    c4 = data[idx + 1] if idx + 1 < len(data) else None
+    if not edit:
+        for fi, xd, yd, what in ((2, TIME, DAMP, "LCINT"), (3, TIME, DAMP, "LCOUTT"),
+                                 (4, PRESSURE, DAMP, "LCOUTP"), (5, TIME, PRESSURE, "LCFIT"),
+                                 (6, TIME, PRESSURE, "LCBULK"), (7, TIME, PRESSURE, "LCID")):
+            lc = _numint(kf, c3, STD8, block.long, fi)
+            if lc:
+                ctx.scan.register_curve(lc, xd, yd, f"{block.name} {what}")
+        if c4 is not None:
+            lc = _numint(kf, c4, STD8, block.long, 1)
+            if lc:
+                ctx.scan.register_curve(lc, TIME, PRESSURE, f"{block.name} P_LIMLC")
+        return
+    _airbag_core_scale(block, ctx, data, sensor)
+    kf.scale_field(c3, STD8, block.long, 0, ctx.fac(PRESSURE))
+    kf.scale_field(c3, STD8, block.long, 1, ctx.fac(DENSITY))
+    if c4 is not None:
+        kf.scale_field(c4, STD8, block.long, 0, ctx.fac(PRESSURE))
+    ctx.count(block.name)
+
+
+def _fac_dim_for_fvopt(fvopt: int):
+    """Dimension of the fabric characteristic parameter FAC by venting
+    option, R16 Vol I p.3-29 (*AIRBAG_WANG_NEFSKE remarks): OPT 1-4
+    unit-less, 5-6 "s/m" (a reciprocal velocity), 7-8 a velocity (gas volume
+    outflow per unit area per unit time).  FLC is the dimensionless leakage
+    flow coefficient in every branch of the mass-flow formulas."""
+    if fvopt in (1, 2, 3, 4):
+        return DIMLESS
+    if fvopt in (5, 6):
+        return DC_FRIC
+    if fvopt in (7, 8):
+        return VELOCITY
+    return None
+
+
+def _deck_airbag_opts(ctx) -> set:
+    """OPT (fabric venting option, Card 5 field 7) of every
+    *AIRBAG_WANG_NEFSKE block in the tree, R16 Vol I p.3-24.  A fabric's
+    FVOPT = 0 defers to this value ("If nonzero, CP23 ... are set to zero;
+    porosity leakage of each material is output")."""
+    opts = set()
+    for kf in ctx.files:
+        for b in kf.blocks:
+            if not b.name.startswith("AIRBAG_WANG_NEFSKE"):
+                continue
+            data = _strip_title(b, list(b.data))
+            if not data:
+                continue
+            rbid = _numint(kf, data[0], STD8, b.long, 2) or 0
+            idx = 1
+            if rbid > 0 and idx < len(data):
+                n = _numint(kf, data[idx], STD8, b.long, 0) or 0
+                idx += 1 + -(-max(n, 0) // 5)
+            elif rbid < 0:
+                idx += 3
+            if idx + 2 < len(data):
+                opts.add(_numint(kf, data[idx + 2], STD8, b.long, 6) or 0)
+    return opts
+
+
+def _fac_dim_with_fallback(ctx, block, fvopt: int):
+    """FAC dimension for a fabric venting option; FVOPT = 0 defers to the
+    airbag's own OPT (R16 Vol II Remark 9) - implemented for
+    *AIRBAG_WANG_NEFSKE only.  A *AIRBAG_HYBRID bag carries its own OPT and
+    a CPM bag (*AIRBAG_PARTICLE) defaults FVOPT = 0 to 8 (Remark 17);
+    neither keyword is modelled, so FVOPT = 0 next to one of them is
+    undecidable.  Returns (dim, note): dim None -> undecidable, note gives
+    the reason; DIMLESS with a note -> FAC is unused."""
+    if fvopt:
+        return _fac_dim_for_fvopt(fvopt), None
+    hybrid = sorted({b.name.split("_")[1] for kf in ctx.files
+                     for b in kf.blocks
+                     if b.name.startswith(("AIRBAG_HYBRID",
+                                           "AIRBAG_PARTICLE"))})
+    if hybrid:
+        return None, ("FVOPT=0 with an *AIRBAG_" + "/".join(hybrid)
+                      + " bag in the tree - HYBRID carries its own OPT and "
+                      "a CPM bag defaults FVOPT to 8 (R16 Vol II Remarks "
+                      "9/17), neither of which kunit models")
+    opts = _deck_airbag_opts(ctx) - {0}
+    if not opts:
+        return DIMLESS, (f"*{block.name}: FVOPT=0 and no airbag with a "
+                         "nonzero venting OPT in the tree - FAC is unused, "
+                         "left unchanged")
+    if len(opts) == 1:
+        opt = next(iter(opts))
+        return _fac_dim_for_fvopt(opt), (f"*{block.name}: FVOPT=0 - FAC "
+                                         f"units taken from the airbag's "
+                                         f"OPT={opt} (R16 Vol I p.3-29)")
+    return None, ("the tree's *AIRBAG_WANG_NEFSKE blocks use several "
+                  "different OPT values")
+
+
+def h_mat_add_airbag_porosity_leakage(block: Block, ctx, edit: bool) -> None:
+    """*MAT_ADD_AIRBAG_POROSITY_LEAKAGE, R16 Vol II p.2-35..2-37: one card
+    MID FLC/X2 FAC/X3 ELA FVOPT X0 X1.  For 0 < X0 < 1 fields 2-3 are the
+    dimensionless Anagonye-Wang porosity coefficients X2/X3; otherwise FLC
+    (dimensionless flow coefficient, |FLC| a curve vs time when negative)
+    and FAC whose dimension follows FVOPT (see _fac_dim_for_fvopt; |FAC| a
+    curve vs absolute pressure when negative).  ELA is a fraction (|ELA| a
+    curve vs time when negative)."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    for li in data:
+        x0 = kf.get_number(li, STD8, block.long, 5) or 0
+        fvopt = _numint(kf, li, STD8, block.long, 4) or 0
+        flc = kf.get_number(li, STD8, block.long, 1)
+        fac = kf.get_number(li, STD8, block.long, 2)
+        ela = kf.get_number(li, STD8, block.long, 3)
+        porosity = 0 < x0 < 1
+        dim, note = _fac_dim_with_fallback(ctx, block, fvopt)
+        if not porosity and fac and dim is None:
+            ctx.error(f"*{block.name}: FAC={fac} with FVOPT={fvopt} - the "
+                      "units of FAC follow the venting option (R16 Vol I "
+                      "p.3-29), and " + (note or "the option is undecidable")
+                      + " - convert manually.")
+            return
+        if not porosity and fac and note and edit:
+            ctx.note(note)
+        if not edit:
+            if ela and ela < 0:
+                ctx.scan.register_curve(int(-ela), TIME, DIMLESS, f"{block.name} ELA(t)")
+            if not porosity:
+                # X0 = 1 (Cards 1d/1e, R16 Vol II p.2-40/2-41): ratio
+                # abscissae; X0 = 0 uses time / absolute pressure
+                fx = DIMLESS if x0 == 1 else TIME
+                px = DIMLESS if x0 == 1 else PRESSURE
+                if flc and flc < 0:
+                    ctx.scan.register_curve(int(-flc), fx, DIMLESS, f"{block.name} FLC")
+                if fac and fac < 0:
+                    ctx.scan.register_curve(int(-fac), px, dim, f"{block.name} FAC")
+            continue
+        if not porosity and fac and fac > 0 and dim is not DIMLESS:
+            kf.scale_field(li, STD8, block.long, 2, ctx.fac(dim))
+    if edit:
+        ctx.count(block.name)
+
+
+def h_mat_cable_discrete_beam(block: Block, ctx, edit: bool) -> None:
+    """*MAT_CABLE_DISCRETE_BEAM / MAT_071, R16 Vol II p.2-514..2-516: Card 1
+    MID RO E LCID F0 TMAXF0 TRAMP IREAD - E > 0 is Young's modulus, E < 0 a
+    STIFFNESS (force/length); LCID is engineering stress vs engineering
+    strain; F0 the initial tensile FORCE, TMAXF0/TRAMP times.  Optional
+    Card 2 (IREAD) OUTPUT TSTART FRACL0 MXEPS MXFRC: start time, length
+    fraction, failure strain, failure FORCE."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    e = kf.get_number(data[0], STD8, block.long, 2)
+    if not edit:
+        lc = _numint(kf, data[0], STD8, block.long, 3)
+        if lc:
+            ctx.scan.register_curve(lc, DIMLESS, PRESSURE, f"{block.name} stress(strain)")
+        return
+    kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(DENSITY))
+    kf.scale_field(data[0], STD8, block.long, 2,
+                   ctx.fac(STIFF if (e is not None and e < 0) else PRESSURE))
+    for fi, dim in ((4, FORCE), (5, TIME), (6, TIME)):
+        kf.scale_field(data[0], STD8, block.long, fi, ctx.fac(dim))
+    if len(data) > 1:
+        kf.scale_field(data[1], STD8, block.long, 1, ctx.fac(TIME))
+        kf.scale_field(data[1], STD8, block.long, 4, ctx.fac(FORCE))
+    ctx.count(block.name)
+
+
+def h_mat_ogden_rubber(block: Block, ctx, edit: bool) -> None:
+    """*MAT_OGDEN_RUBBER / MAT_077_O, R16 Vol II p.2-561..2-568.
+
+    Card 1 MID RO PR N NV G SIGF REF (G a shear modulus, SIGF a limit
+    stress); Card 2 only when PR < 0: TBHYS LCBI LCPL WBI WPL D1 D2 D3
+    (force-vs-displacement test curves, weights, compression compliance
+    constants D_i with W_H = sum (J-1)^2i / D_i, i.e. reciprocal
+    pressures); then for N > 0 Card 3a SGL SW ST LCID1 DATA LCID2 BSTART
+    TRAMP (specimen gauge length/width/thickness, force vs change in gauge
+    length, relaxation curve stress vs time, 1/time, time) or for N <= 0
+    Cards 3b.1/3b.2 MU1-8 (shear moduli, or temperature-curve ids when
+    N = -1) and ALPHA1-8 (exponents); then up to 12 viscoelastic cards Gi
+    BETAi VFLAG (relaxation modulus, decay constant 1/time)."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    c1 = data[0]
+    pr = kf.get_number(c1, STD8, block.long, 2) or 0
+    n = _numint(kf, c1, STD8, block.long, 3) or 0
+    idx = 1
+    c2 = None
+    if pr < 0:
+        if idx >= len(data):
+            ctx.error(f"*{block.name}: PR < 0 requires the hysteresis Card 2 "
+                      "(R16 Vol II p.2-563) - not found.")
+            return
+        c2 = data[idx]
+        idx += 1
+    c3a = c3b1 = None
+    if n > 0:
+        if idx >= len(data):
+            ctx.error(f"*{block.name}: N={n} > 0 requires Card 3a - not found.")
+            return
+        c3a = data[idx]
+        idx += 1
+    else:
+        if idx + 1 >= len(data):
+            ctx.error(f"*{block.name}: N={n} requires Cards 3b.1/3b.2 - not found.")
+            return
+        c3b1 = data[idx]            # Card 3b.2 (ALPHAi exponents) is dimensionless
+        idx += 2
+    visco = data[idx:]
+    if not edit:
+        if c2 is not None:
+            # TBHYS (p.2-563 -> *MAT_HYPERELASTIC_RUBBER Remarks 1/2,
+            # p.2-557/2-558): a table of damage curves indexed by the peak
+            # deviatoric strain-energy DENSITY, the sub-curves giving the
+            # stress-reduction factor vs strain-energy density; TBHYS < 0
+            # swaps the sub-curves' axes
+            tb = kf.get_number(c2, STD8, block.long, 0)
+            if tb:
+                if tb > 0:
+                    ctx.scan.register_table(int(tb), PRESSURE, PRESSURE, DIMLESS)
+                else:
+                    ctx.scan.register_table(int(-tb), PRESSURE, DIMLESS, PRESSURE)
+            for fi, what in ((1, "LCBI"), (2, "LCPL")):
+                lc = _numint(kf, c2, STD8, block.long, fi)
+                if lc:
+                    ctx.scan.register_curve(lc, LENGTH, FORCE, f"{block.name} {what}")
+        if c3a is not None:
+            lc1 = _numint(kf, c3a, STD8, block.long, 3)
+            if lc1:
+                ctx.scan.register_curve(lc1, LENGTH, FORCE, f"{block.name} LCID1 force(dL)")
+            lc2 = _numint(kf, c3a, STD8, block.long, 5)
+            if lc2:
+                ctx.scan.register_curve(lc2, TIME, PRESSURE, f"{block.name} LCID2 relaxation")
+        if n == -1 and c3b1 is not None:
+            for fi in range(8):
+                lc = _numint(kf, c3b1, STD8, block.long, fi)
+                if lc:
+                    ctx.scan.register_curve(lc, TEMP, PRESSURE, f"{block.name} MU{fi+1}(T)")
+        return
+    kf.scale_field(c1, STD8, block.long, 1, ctx.fac(DENSITY))
+    kf.scale_field(c1, STD8, block.long, 5, ctx.fac(PRESSURE))       # G
+    kf.scale_field(c1, STD8, block.long, 6, ctx.fac(PRESSURE))       # SIGF
+    if c2 is not None:
+        for fi in (5, 6, 7):
+            kf.scale_field(c2, STD8, block.long, fi, ctx.fac(INV_PRESSURE))
+    if c3a is not None:
+        for fi in (0, 1, 2):
+            kf.scale_field(c3a, STD8, block.long, fi, ctx.fac(LENGTH))
+        kf.scale_field(c3a, STD8, block.long, 6, ctx.fac(RATE))
+        kf.scale_field(c3a, STD8, block.long, 7, ctx.fac(TIME))
+    if c3b1 is not None and n == 0:
+        for fi in range(8):
+            kf.scale_field(c3b1, STD8, block.long, fi, ctx.fac(PRESSURE))
+    # VFLAG sits on the FIRST viscoelastic card only (p.2-566); with
+    # VFLAG = 1 the Gi are NORMALIZED relaxation moduli - dimensionless
+    # (p.2-567), exactly as in the MAT_181 handler
+    vflag = (_numint(kf, visco[0], STD8, block.long, 2) or 0) if visco else 0
+    for li in visco:
+        if vflag != 1:
+            kf.scale_field(li, STD8, block.long, 0, ctx.fac(PRESSURE))
+        kf.scale_field(li, STD8, block.long, 1, ctx.fac(RATE))
+    if vflag == 1 and visco:
+        ctx.note(f"*{block.name}: VFLAG=1 - the Prony Gi are normalized "
+                 "relaxation moduli (R16 Vol II p.2-567), left unchanged")
+    ctx.count(block.name)
+
+
+def h_mat_seatbelt(block: Block, ctx, edit: bool) -> None:
+    """*MAT_SEATBELT / MAT_B01, R16 Vol II p.2-2047..2-2050: Card 1 MID MPUL
+    LLCID ULCID LMIN CSE DAMP E (mass per unit length, loading curve force
+    vs engineering strain - or a table of such curves by strain rate -,
+    unloading curve, minimum LENGTH, flag, Rayleigh factor, Young's
+    modulus); Card 2 when E > 0: A I J AS F M R (area, area moments, shear
+    area, max FORCE, max MOMENT, mass-scaling factor); the 2D option adds
+    P1DOFF FORM ECOAT TCOAT SCOAT EB PRBA PRAB (moduli, coat thickness,
+    coat yield stress; ECOAT/EB < 0 are ratios) and GAB (shear modulus)."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    c1 = data[0]
+    e = kf.get_number(c1, STD8, block.long, 7) or 0
+    idx = 1
+    c2 = None
+    if e > 0:
+        if idx >= len(data):
+            ctx.error(f"*{block.name}: E > 0 requires the bending Card 2 - not found.")
+            return
+        c2 = data[idx]
+        idx += 1
+    c3 = c4 = None
+    if "2D" in block.name.split("_"):
+        if idx < len(data):
+            c3 = data[idx]
+            idx += 1
+        if idx < len(data):
+            c4 = data[idx]
+            idx += 1
+    if not edit:
+        for fi, what in ((2, "LLCID"), (3, "ULCID")):
+            lc = _numint(kf, c1, STD8, block.long, fi)
+            if lc:
+                ctx.scan.register_curve(lc, DIMLESS, FORCE, f"{block.name} {what} force(strain)")
+                if fi == 2:
+                    ctx.scan.register_table(lc, RATE, DIMLESS, FORCE)
+        return
+    kf.scale_field(c1, STD8, block.long, 1, ctx.fac(MASS_LEN))
+    kf.scale_field(c1, STD8, block.long, 4, ctx.fac(LENGTH))
+    if e > 0:
+        kf.scale_field(c1, STD8, block.long, 7, ctx.fac(PRESSURE))
+    if c2 is not None:
+        for fi, dim in ((0, AREA), (1, L4), (2, L4), (3, AREA), (4, FORCE), (5, MOMENT)):
+            kf.scale_field(c2, STD8, block.long, fi, ctx.fac(dim))
+    if c3 is not None:
+        for fi, dim in ((2, PRESSURE), (3, LENGTH), (4, PRESSURE), (5, PRESSURE)):
+            v = kf.get_number(c3, STD8, block.long, fi)
+            if fi in (2, 5) and v is not None and v < 0:
+                continue                    # ratio, dimensionless
+            kf.scale_field(c3, STD8, block.long, fi, ctx.fac(dim))
+    if c4 is not None:
+        kf.scale_field(c4, STD8, block.long, 0, ctx.fac(PRESSURE))
+    ctx.count(block.name)
+
+
+def h_smat_spring_general_nonlinear(block: Block, ctx, edit: bool) -> None:
+    """*MAT_SPRING_GENERAL_NONLINEAR / MAT_S06, R16 Vol II p.2-2034: MID
+    LCDL LCDU BETA TYI CYI - loading/unloading curves force vs displacement
+    (or moment vs rotation for torsional springs; tables add a velocity
+    axis), TYI/CYI initial yield forces (moments).  Torsional use is
+    resolved post-scan like S04/S05 (smat_blocks)."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    if not edit:
+        ctx.scan.smat_blocks.append((kf, block, "S06"))
+        return
+    tors = _smat_torsional(kf, block, ctx)
+    fdim = MOMENT if tors else FORCE
+    kf.scale_field(data[0], STD8, block.long, 4, ctx.fac(fdim))
+    kf.scale_field(data[0], STD8, block.long, 5, ctx.fac(fdim))
+    ctx.count(block.name)
+
+
+def h_boundary_flux(block: Block, ctx, edit: bool) -> None:
+    """*BOUNDARY_FLUX_SEGMENT / _SET, R16 Vol I p.5-46..5-48: Card 1 ids,
+    Card 2 LCID MLC1 MLC2 MLC3 MLC4 LOC NHISV, repeated as (segment, flux)
+    pairs until the next keyword.  LCID = 0: MLC1-4 are the constant nodal
+    heat FLUXES (power/area); LCID > 0: curve (time, flux) and LCID < 0:
+    curve (temperature, flux), the MLCs being dimensionless multipliers.
+    NHISV > 0 hands the flux to a user subroutine with history variables of
+    unknown units - refused (it would also break the 2-card stride)."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) % 2:
+        ctx.error(f"*{block.name}: {len(data)} data cards do not pair up "
+                  "into (segment, flux) couples (R16 Vol I p.5-46) - "
+                  "convert manually.")
+        return
+    for i in range(0, len(data), 2):
+        c2 = data[i + 1]
+        lcid = _numint(kf, c2, STD8, block.long, 0) or 0
+        nhisv = _numint(kf, c2, STD8, block.long, 6) or 0
+        if nhisv > 0:
+            ctx.error(f"*{block.name}: NHISV={nhisv} history variables feed "
+                      "a user-defined flux subroutine (R16 Vol I p.5-48) - "
+                      "units unknown, convert manually.")
+            return
+        if not edit:
+            if lcid:
+                ctx.scan.register_curve(abs(lcid), TIME if lcid > 0 else TEMP,
+                                        HEAT_FLUX, f"{block.name} flux curve")
+            continue
+        if lcid == 0:
+            for fi in (1, 2, 3, 4):
+                kf.scale_field(c2, STD8, block.long, fi, ctx.fac(HEAT_FLUX))
+    if edit:
+        ctx.count(block.name)
+
+
+def h_damping_part_stiffness(block: Block, ctx, edit: bool) -> None:
+    """*DAMPING_PART_STIFFNESS[_SET], R16 Vol I p.15-12: PID/PSID COEF -
+    COEF > 0 is a unitless stiffness-weighted damping coefficient, COEF < 0
+    a Rayleigh coefficient "in units of time"."""
+    if not edit:
+        return
+    kf = ctx.kf
+    for li in block.data:
+        v = kf.get_number(li, STD8, block.long, 1)
+        if v is not None and v < 0:
+            kf.scale_field(li, STD8, block.long, 1, ctx.fac(TIME))
+    ctx.count(block.name)
+
+
+def h_section_solid_spg(block: Block, ctx, edit: bool) -> None:
+    """*SECTION_SOLID_SPG, R16 Vol I p.41-85..41-96: Card 1 SECID ELFORM
+    AET COHOFF GASKETT, Card 2b.1 DX DY DZ ISPLINE KERNEL SMSTEP MSC
+    (normalised dilation parameters and integers), optional Card 2b.2 IDAM
+    FS STRETCH ITB MSFAC ISC BOXID PDAMP - FS is the critical value of the
+    IDAM quantity: a STRESS for IDAM = 2 (maximum principal stress), a
+    strain/ratio otherwise; IDAM 7/11/13 damage models are refused when FS
+    is set because their FS meaning is model-specific."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 3:
+        if edit:
+            ctx.count(block.name)
+        return
+    c = data[2]
+    idam = _numint(kf, c, STD8, block.long, 0) or 1
+    fs = kf.get_number(c, STD8, block.long, 1)
+    if idam in (7, 11, 13) and fs:
+        ctx.error(f"*{block.name}: IDAM={idam} with FS={fs} - the failure "
+                  "value of that damage model is not documented "
+                  "dimensionally (R16 Vol I p.41-92); convert manually.")
+        return
+    if edit:
+        if idam == 2 and fs:
+            kf.scale_field(c, STD8, block.long, 1, ctx.fac(PRESSURE))
+        ctx.count(block.name)
+
+
+def h_mat_general_nonlinear_1dof(block: Block, ctx, edit: bool) -> None:
+    """*MAT_GENERAL_NONLINEAR_1DOF_DISCRETE_BEAM / MAT_121, R16 Vol II
+    p.2-832..2-834: Card 1 MID RO K IUNLD OFFSET DAMPF (unloading
+    STIFFNESS), Card 2 LCIDT LCIDTU LCIDTD LCIDTE (force vs displacement,
+    force vs displacement, damping force vs velocity, damping scale factor
+    vs displacement), Card 3 UTFAIL UCFAIL IU (displacements)."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 2:
+        return
+    if not edit:
+        for fi, xd, yd in ((0, LENGTH, FORCE), (1, LENGTH, FORCE),
+                           (2, VELOCITY, FORCE), (3, LENGTH, DIMLESS)):
+            lc = _numint(kf, data[1], STD8, block.long, fi)
+            if lc:
+                ctx.scan.register_curve(lc, xd, yd, f"{block.name} card 2 field {fi+1}")
+        return
+    kf.scale_field(data[0], STD8, block.long, 1, ctx.fac(DENSITY))
+    kf.scale_field(data[0], STD8, block.long, 2, ctx.fac(STIFF))
+    if len(data) > 2:
+        for fi in (0, 1, 2):
+            kf.scale_field(data[2], STD8, block.long, fi, ctx.fac(LENGTH))
+    ctx.count(block.name)
+
+
+def h_mat_general_nonlinear_6dof(block: Block, ctx, edit: bool) -> None:
+    """*MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM / MAT_119, R16 Vol II
+    p.2-794..2-805: Card 1 MID RO KT KR IUNLD OFFSET DAMPF IFLAG (KT a
+    STIFFNESS, KR a rotational stiffness = moment per radian); Cards 2/3
+    loading/unloading curves: force vs displacement for the three
+    translational DOFs, moment vs rotation for the rotational ones; Card 4
+    damping curves force vs velocity / moment vs angular velocity; Card 5
+    damping scale factors vs displacement / rotation; Cards 6/7 failure
+    displacements (lengths) and rotations, FCRIT a flag; Card 8 initial
+    displacements IUR IUS IUT (lengths) and rotations; Card 15 (IUNLD = 2,
+    IFLAG 0/1) KTS KTT KRS KRT stiffnesses.  IFLAG = 1 divides
+    displacements and velocities by the initial length, so the curve
+    abscissae become strains and strain rates.  IFLAG = 2 (crushable-frame
+    formulation, Cards 9-14) is not modelled and refused."""
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if len(data) < 8:
+        ctx.error(f"*{block.name}: expected at least 8 cards (R16 Vol II "
+                  f"p.2-794), found {len(data)}.")
+        return
+    c1 = data[0]
+    iflag = _numint(kf, c1, STD8, block.long, 7) or 0
+    iunld = _numint(kf, c1, STD8, block.long, 4) or 0
+    if iflag == 2:
+        ctx.error(f"*{block.name}: IFLAG=2 adds the crushable-frame Cards "
+                  "9-14 (R16 Vol II p.2-802) - layout not modelled, convert "
+                  "manually.")
+        return
+    if iflag == 1:
+        # p.2-808 Remark 2: every displacement/velocity is divided by the
+        # initial length, so F = -K*dl/l0 makes the translational K a FORCE
+        # and the curve abscissae strains; the same division changes the
+        # rotational quantities' dimensions (moment*length etc.), which is
+        # not modelled - refuse when any rotational data is present
+        rot = kf.get_number(c1, STD8, block.long, 3)
+        for ci in (1, 2, 3, 4, 5, 6, 7):
+            for fi in (3, 4, 5):
+                rot = rot or kf.get_number(data[ci], STD8, block.long, fi)
+        if len(data) > 8:
+            rot = rot or kf.get_number(data[8], STD8, block.long, 2) \
+                or kf.get_number(data[8], STD8, block.long, 3)
+        if rot:
+            ctx.error(f"*{block.name}: IFLAG=1 divides all displacements by "
+                      "the initial length (R16 Vol II p.2-808 Remark 2); "
+                      "the resulting dimensions of the ROTATIONAL stiffness/"
+                      "curves/failure values are not modelled - convert "
+                      "manually.")
+            return
+    tx = DIMLESS if iflag == 1 else LENGTH          # translational abscissa
+    tv = RATE if iflag == 1 else VELOCITY
+    kdim = FORCE if iflag == 1 else STIFF           # F = -K*dl/l0 for IFLAG=1
+    if not edit:
+        spec = [(data[1], (tx, FORCE), (DIMLESS, MOMENT)),
+                (data[2], (tx, FORCE), (DIMLESS, MOMENT)),
+                (data[3], (tv, FORCE), (ANG_VEL, MOMENT)),
+                (data[4], (tx, DIMLESS), (DIMLESS, DIMLESS))]
+        for li, tdims, rdims in spec:
+            for fi in range(6):
+                lc = _numint(kf, li, STD8, block.long, fi)
+                if lc:
+                    xd, yd = tdims if fi < 3 else rdims
+                    ctx.scan.register_curve(lc, xd, yd, f"{block.name} curve")
+        return
+    kf.scale_field(c1, STD8, block.long, 1, ctx.fac(DENSITY))
+    kf.scale_field(c1, STD8, block.long, 2, ctx.fac(kdim))
+    kf.scale_field(c1, STD8, block.long, 3, ctx.fac(MOMENT))
+    if iflag != 1:
+        for ci in (5, 6, 7):
+            for fi in (0, 1, 2):
+                kf.scale_field(data[ci], STD8, block.long, fi, ctx.fac(LENGTH))
+    if iunld == 2 and len(data) > 8:
+        kf.scale_field(data[8], STD8, block.long, 0, ctx.fac(kdim))
+        kf.scale_field(data[8], STD8, block.long, 1, ctx.fac(kdim))
+        kf.scale_field(data[8], STD8, block.long, 2, ctx.fac(MOMENT))
+        kf.scale_field(data[8], STD8, block.long, 3, ctx.fac(MOMENT))
+    ctx.count(block.name)
+
+
+# ── registration ────────────────────────────────────────────────────────────
+# R16 Vol II p.2-174 (*MAT_VISCOELASTIC / MAT_006): MID RO BULK G0 GI BETA -
+# bulk and shear moduli, decay constant 1/time.  A negative value is a
+# temperature-curve id; the Spec would rescale it, so the scan-time check
+# below refuses such decks.
+def x_mat_006(block: Block, ctx) -> None:
+    kf = ctx.kf
+    data = _strip_title(block, list(block.data))
+    if not data:
+        return
+    for fi in (2, 3, 4, 5):
+        v = kf.get_number(data[0], STD8, block.long, fi)
+        if v is not None and v < 0:
+            ctx.error(f"*{block.name}: field {fi+1} = {v} < 0 is a "
+                      "temperature-curve id (R16 Vol II p.2-174); the Spec "
+                      "would rescale it - convert this material manually.")
+
+
+register_keyword("MAT_VISCOELASTIC",
+                 Spec(cards=[C({1: DENSITY, 2: PRESSURE, 3: PRESSURE,
+                                4: PRESSURE, 5: RATE})],
+                      probe={"ro": (0, 1)}),
+                 alias="MAT_006", scan_extra=x_mat_006)
+# R16 Vol II p.2-542..2-546 (*MAT_GENERAL_VISCOELASTIC / MAT_076): Card 1
+# MID RO BULK PCF EF TREF A B (TREF a temperature, A/B WLF constants - B in
+# temperature units, never rescaled), Card 2 LCID NT BSTART TRAMP LCIDK NTK
+# BSTARTK TRAMPK (relaxation curves stress vs time, 1/time, time), Prony
+# cards Gi BETAi Ki BETAKi.  The MOISTURE option inserts Card 3 MO ALPHA
+# BETA GAMMA MST (dimensionless moisture data / curve ids).
+_M076_C1 = C({1: DENSITY, 2: PRESSURE, 5: TEMP, 7: TEMP})
+_M076_C2 = C({2: RATE, 3: TIME, 6: RATE, 7: TIME})
+_M076_PRONY = C({0: PRESSURE, 1: RATE, 2: PRESSURE, 3: RATE})
+register_keyword("MAT_GENERAL_VISCOELASTIC",
+                 Spec(cards=[_M076_C1, _M076_C2], repeat=_M076_PRONY,
+                      curves=[(1, 0, TIME, PRESSURE), (1, 4, TIME, PRESSURE)],
+                      probe={"ro": (0, 1)}),
+                 alias="MAT_076")
+register_keyword("MAT_GENERAL_VISCOELASTIC_MOISTURE",
+                 Spec(cards=[_M076_C1, _M076_C2, C()], repeat=_M076_PRONY,
+                      curves=[(1, 0, TIME, PRESSURE), (1, 4, TIME, PRESSURE),
+                              # MST > 0: moisture vs TIME (p.2-546)
+                              (2, 4, TIME, DIMLESS)],
+                      probe={"ro": (0, 1)}),
+                 alias="MAT_076_MOISTURE")
+# R16 Vol I p.19-70 (*ELEMENT_SEATBELT): EID PID N1 N2 SBRID SLEN N3 N4 -
+# five I8 ids, then SLEN (the initial slack LENGTH) as an E16 spanning two
+# 8-char columns (the ELEMENT_MASS convention), then N3/N4 as I8.
+register_keyword("ELEMENT_SEATBELT",
+                 Spec(repeat=C({5: LENGTH}, (8, 8, 8, 8, 8, 16, 8, 8))))
+
+
+def h_element_seatbelt_accel(block: Block, ctx, edit: bool) -> None:
+    """*ELEMENT_SEATBELT_ACCELEROMETER, R16 Vol I p.19-73: SBACID NID1 NID2
+    NID3 IGRAV INTOPT MASS (10-char fields).  MASS is an optional lumped
+    mass; IGRAV > 1 is a curve id giving the gravitation flag vs TIME
+    (1 / -1..-6 are plain flags)."""
+    kf = ctx.kf
+    for li in block.data:
+        if not edit:
+            igrav = _numint(kf, li, STD8, block.long, 4) or 0
+            if igrav > 1:
+                ctx.scan.register_curve(igrav, TIME, DIMLESS,
+                                        block.name + " IGRAV(t)")
+            continue
+        kf.scale_field(li, STD8, block.long, 6, ctx.fac(MASS))
+    if edit:
+        ctx.count(block.name)
+
+
+CUSTOM["ELEMENT_SEATBELT_ACCELEROMETER"] = h_element_seatbelt_accel
+# R16 Vol I p.41-58 (*SECTION_SEATBELT): SECID AREA THICK (contact area and
+# contact thickness).
+register_keyword("SECTION_SEATBELT", Spec(repeat=C({1: AREA, 2: LENGTH})))
+# R16 Vol II p.2-127 (*MAT_ADD_PERMEABILITY): MID PERM PERMY PERMZ THEXP
+# LCKZ PMTYP - "the units of PERM are length/time" (Remark 1); PMTYP != 0
+# makes PERM/PERMY/PERMZ curve ids (permeability vs volume ratio / plastic
+# strain / effective pressure); THEXP is 1/temperature (never rescaled),
+# LCKZ a factor vs z-coordinate.
+def h_mat_add_permeability(block: Block, ctx, edit: bool) -> None:
+    kf = ctx.kf
+    for li in block.data:
+        pmtyp = _numint(kf, li, STD8, block.long, 6) or 0
+        if not edit:
+            lckz = _numint(kf, li, STD8, block.long, 5)
+            if lckz:
+                ctx.scan.register_curve(lckz, LENGTH, DIMLESS, f"{block.name} LCKZ(z)")
+            if pmtyp:
+                xd = {1: DIMLESS, 2: DIMLESS, 3: PRESSURE}.get(pmtyp, DIMLESS)
+                for fi in (1, 2, 3):
+                    lc = _numint(kf, li, STD8, block.long, fi)
+                    if lc:
+                        ctx.scan.register_curve(lc, xd, VELOCITY, f"{block.name} PERM curve")
+            continue
+        if pmtyp == 0:
+            for fi in (1, 2, 3):
+                kf.scale_field(li, STD8, block.long, fi, ctx.fac(VELOCITY))
+    if edit:
+        ctx.count(block.name)
+
+
+for _n, _h in (("AIRBAG_WANG_NEFSKE", h_airbag_wang_nefske),
+               ("AIRBAG_WANG_NEFSKE_JETTING", h_airbag_wang_nefske),
+               ("AIRBAG_WANG_NEFSKE_MULTIPLE_JETTING", h_airbag_wang_nefske),
+               ("AIRBAG_WANG_NEFSKE_POP", h_airbag_wang_nefske),
+               ("AIRBAG_WANG_NEFSKE_JETTING_POP", h_airbag_wang_nefske),
+               ("AIRBAG_WANG_NEFSKE_MULTIPLE_JETTING_POP", h_airbag_wang_nefske),
+               ("AIRBAG_WANG_NEFSKE_JETTING_CM", h_airbag_wang_nefske),
+               ("AIRBAG_WANG_NEFSKE_MULTIPLE_JETTING_CM", h_airbag_wang_nefske),
+               ("AIRBAG_LINEAR_FLUID", h_airbag_linear_fluid),
+               ("MAT_ADD_AIRBAG_POROSITY_LEAKAGE", h_mat_add_airbag_porosity_leakage),
+               ("MAT_ADD_PERMEABILITY", h_mat_add_permeability),
+               ("MAT_CABLE_DISCRETE_BEAM", h_mat_cable_discrete_beam),
+               ("MAT_OGDEN_RUBBER", h_mat_ogden_rubber),
+               ("MAT_SEATBELT", h_mat_seatbelt),
+               ("MAT_SEATBELT_2D", h_mat_seatbelt),
+               ("MAT_SPRING_GENERAL_NONLINEAR", h_smat_spring_general_nonlinear),
+               ("BOUNDARY_FLUX_SEGMENT", h_boundary_flux),
+               ("BOUNDARY_FLUX_SET", h_boundary_flux),
+               ("DAMPING_PART_STIFFNESS", h_damping_part_stiffness),
+               ("DAMPING_PART_STIFFNESS_SET", h_damping_part_stiffness),
+               ("SECTION_SOLID_SPG", h_section_solid_spg),
+               ("MAT_GENERAL_NONLINEAR_1DOF_DISCRETE_BEAM", h_mat_general_nonlinear_1dof),
+               ("MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM", h_mat_general_nonlinear_6dof)):
+    CUSTOM[_n] = _h
+for _a, _n in (("MAT_071", "MAT_CABLE_DISCRETE_BEAM"),
+               ("MAT_077_O", "MAT_OGDEN_RUBBER"),
+               ("MAT_B01", "MAT_SEATBELT"), ("MAT_B01_2D", "MAT_SEATBELT_2D"),
+               ("MAT_S06", "MAT_SPRING_GENERAL_NONLINEAR"),
+               ("MAT_121", "MAT_GENERAL_NONLINEAR_1DOF_DISCRETE_BEAM"),
+               ("MAT_119", "MAT_GENERAL_NONLINEAR_6DOF_DISCRETE_BEAM")):
+    _MAT_ALIASES[_a] = _n
+# R16 Vol I p.15-10..15-11 (*DAMPING_PART_MASS[_SET]): Card 1 PID/PSID
+# LCID SF FLAG; FLAG = 1 adds the dimensionless scale-factor card STX STY
+# STZ SRX SRY SRZ.  The LCID curve is the system-damping constant D_s vs
+# time (D_s = 2*omega_min, a 1/time).  A repeat-Spec would treat the FLAG
+# card as another definition and register its STY as a curve id.
+
+
+def h_damping_part_mass(block: Block, ctx, edit: bool) -> None:
+    kf = ctx.kf
+    data = list(block.data)
+    i = 0
+    while i < len(data):
+        li = data[i]
+        lcid = _numint(kf, li, STD8, block.long, 1)
+        flag = _numint(kf, li, STD8, block.long, 3) or 0
+        if not edit:
+            if lcid:
+                ctx.scan.register_curve(lcid, TIME, FREQ,
+                                        block.name + " Ds(t)")
+        else:
+            sf = kf.get_number(li, STD8, block.long, 2)
+            if not lcid and sf is not None and sf not in (0, 1):
+                ctx.warn(f"*{block.name}: SF={sf} with LCID=0 - the manual "
+                         "only defines SF as the curve's scale factor (R16 "
+                         "Vol I p.15-10); left unchanged, verify.")
+        i += 2 if flag == 1 else 1
+    if edit:
+        ctx.count(block.name)
+
+
+CUSTOM["DAMPING_PART_MASS"] = h_damping_part_mass
+CUSTOM["DAMPING_PART_MASS_SET"] = h_damping_part_mass
+# R16 Vol I p.41-85 (*SECTION_SOLID_EFG): Card 2a.1 DX DY DZ ISPLINE IDILA
+# IEBT IDIM TOLDEF are dimensionless kernel parameters; the optional Card
+# 2a.2 IPS STIME IKEN SF CMID IBR DS ECUT holds the (obsolete) switch TIME
+# and ECUT, a minimum distance (LENGTH).
+SPECS["SECTION_SOLID_EFG"] = Spec(cards=[C(), C(), C({1: TIME, 7: LENGTH})],
+                                  extra_ok=True)
+# ids / flags only: R16 Vol I p.10-3 (*CONSTRAINED_ADAPTIVITY DNID NID1
+# NID2), p.16-46 (*DATABASE_CROSS_SECTION_SET[_ID]: CSID heading card, then
+# NSID HSID BSID SSID TSID DSID ID ITYPE).
+for _n in ("CONSTRAINED_ADAPTIVITY", "DATABASE_CROSS_SECTION_SET",
+           "DATABASE_CROSS_SECTION_SET_ID", "DATABASE_CROSS_SECTION_SET_TITLE"):
+    WHITELIST.add(_n)
+# *COMMENT (R16 Vol I p.8-1): everything up to the next keyword is ignored by
+# LS-DYNA.  Some decks glue text to the keyword ("*COMMENTUNITS: ..."), so
+# the prefix form is needed.
+WHITELIST_PREFIXES = WHITELIST_PREFIXES + ("COMMENT",)
+# R16 Vol I p.37-38 (*PART_MOVE): PID XMOV YMOV ZMOV CID IFSET with the
+# *NODE column split - PID I8, the three incremental displacements E16 (the
+# manual's own p.37-40 example line uses those columns), CID/IFSET I8.  All
+# three are LENGTHS (for CID < 0, ZMOV is the distance along a vector).
+register_keyword("PART_MOVE", Spec(repeat=C({1: LENGTH, 2: LENGTH, 3: LENGTH},
+                                            NODE_W)))
+# R16 Vol I p.16-33 (*DATABASE_BINARY_INTFOR_FILE): the FILE option only
+# PREPENDS the FNAME Card 0 - the required Card 1 (DT LCDT BEAM NPLTC PSETID
+# CID) still follows, DT being "the time interval between output states"
+# (p.16-34).
+
+
+def h_database_dt_file(block: Block, ctx, edit: bool) -> None:
+    if not edit:
+        return
+    if len(block.data) > 1:
+        ctx.kf.scale_field(block.data[1], STD8, block.long, 0, ctx.fac(TIME))
+        ctx.count("DATABASE_* (dt)")
+
+
+CUSTOM["DATABASE_BINARY_INTFOR_FILE"] = h_database_dt_file

@@ -222,6 +222,13 @@ PRESETS: Dict[str, UnitSystem] = {
         UnitSystem("kg", "cm", "ms"),
         UnitSystem("kg", "cm", "s"),
         UnitSystem("kg", "mm", "s"),
+        # g-mm-s (pressure = Pa, force = uN): used by several EM / MEMS
+        # decks in the k_examples_db web corpus (Apaisal/EMR-L: RO
+        # 2.64e-3 g/mm3, E 9.7e10 Pa).  Without the preset such decks tie
+        # between g-mm-ms / kg-cm-ms / kg-cm-s on density alone.  Added
+        # 2026-08-23 with a detection regression audit over the 364
+        # dynaexamples masters (no verdict flipped).
+        UnitSystem("g", "mm", "s"),
         UnitSystem("slinch", "in", "s"),
         UnitSystem("slug", "ft", "s"),
         UnitSystem("lb", "ft", "s"),

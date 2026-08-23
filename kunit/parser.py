@@ -39,6 +39,21 @@ def parse_number(token: str) -> Optional[Decimal]:
     return v if v.is_finite() else None
 
 
+_PARAM_REF = re.compile(r"^(-?)&\s*([A-Za-z_][A-Za-z0-9_]*)\s*$")
+
+
+def param_ref(token: str) -> Optional[Tuple[str, int]]:
+    """``&name`` / ``-&name`` field -> (NAME, sign), else None.
+
+    *PARAMETER names are matched case-insensitively (R16 Vol I *PARAMETER:
+    "R SHLTHK" and "RSHLTHK" define the same 9-character name; a minus sign
+    directly before the "&" switches the sign of the value, Remark 1)."""
+    m = _PARAM_REF.match(token.strip())
+    if not m:
+        return None
+    return m.group(2).upper(), (-1 if m.group(1) else 1)
+
+
 def format_fixed(value: Decimal, width: int, pad_right: int = 0) -> Tuple[str, float]:
     """Most precise decimal representation of `value` that fits `width` chars.
 
@@ -86,6 +101,12 @@ class KFile:
         self.lines: List[str] = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
         self.blocks: List[Block] = self._scan_blocks()
         self.max_fmt_err = 0.0
+        # *PARAMETER table shared by the whole include tree (NAME -> Decimal),
+        # attached by convert.load_tree so get_number() can resolve ``&name``
+        # references; and the sink scale_field() reports ``&name`` fields to
+        # in parameter-aware conversions instead of raising.
+        self.params: Optional[dict] = None
+        self.param_sink = None
 
     def _scan_blocks(self) -> List[Block]:
         blocks: List[Block] = []
@@ -149,7 +170,21 @@ class KFile:
         fl = self.fields(line_idx, widths, long)
         if fi >= len(fl):
             return None
-        return parse_number(fl[fi][0])
+        raw = fl[fi][0]
+        if "&" in raw:
+            return self.resolve_param(raw)
+        return parse_number(raw)
+
+    def resolve_param(self, raw: str) -> Optional[Decimal]:
+        """Value of a ``&name`` / ``-&name`` field from the tree's parameter
+        table, or None when unknown / no table attached."""
+        ref = param_ref(raw)
+        if ref is None or not self.params:
+            return None
+        v = self.params.get(ref[0])
+        if v is None:
+            return None
+        return -v if ref[1] < 0 else v
 
     def set_field(self, line_idx: int, widths: Sequence[int], long: bool,
                   fi: int, text_value: str) -> None:
@@ -182,8 +217,21 @@ class KFile:
         if fi >= len(fl):
             return False
         raw = fl[fi][0]
+        t = raw.strip()
+        if t.startswith("<") and t.endswith(">") and len(t) > 2:
+            # inline bracket expression (R16 Vol I p.36-8 Remark 1): the
+            # comma-format twin of *PARAMETER_EXPRESSION.  Nothing in it can
+            # be rescaled safely, so it is always refused - silently leaving
+            # it behind would mix unit systems in the output.
+            raise ParameterFieldError(line_idx, t, kind="inline expression")
         if "&" in raw:
-            raise ParameterFieldError(line_idx, raw.strip())
+            ref = param_ref(raw)
+            if self.param_sink is not None and ref is not None:
+                # parameter-aware conversion: the *PARAMETER value is scaled
+                # later (convert._scale_parameters); the reference stays
+                self.param_sink(ref[0], f)
+                return False
+            raise ParameterFieldError(line_idx, t)
         v = parse_number(raw)
         if v is None or v == 0 or f == 1:
             return False
@@ -230,9 +278,11 @@ class KFile:
 
 
 class ParameterFieldError(Exception):
-    def __init__(self, line_idx: int, token: str):
-        super().__init__(f"line {line_idx + 1}: field {token!r} references a "
-                         f"*PARAMETER — cannot scale parametrised values")
+    def __init__(self, line_idx: int, token: str, kind: str = "*PARAMETER"):
+        what = ("is an inline <expression> — cannot scale parametrised values"
+                if kind == "inline expression" else
+                "references a *PARAMETER — cannot scale parametrised values")
+        super().__init__(f"line {line_idx + 1}: field {token!r} {what}")
         self.line_idx = line_idx
 
 
